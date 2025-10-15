@@ -13,6 +13,7 @@ dependencies:
   - psycopg2
   - asyncpg
   - git
+  - matplotlib
   - pip:
     - dash
     - dash-bootstrap-components
