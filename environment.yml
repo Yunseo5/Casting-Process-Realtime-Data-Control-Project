@@ -1,0 +1,40 @@
+name: Casting-Process-Realtime-Data-Control-Project
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  - pandas
+  - numpy
+  - scipy
+  - scikit-learn
+  - statsmodels
+  - sqlalchemy
+  - psycopg2
+  - asyncpg
+  - git
+  - pip:
+    - dash
+    - dash-bootstrap-components
+    - plotly
+    - fastapi
+    - "uvicorn[standard]"
+    - httpx
+    - aiohttp
+    - aioredis
+    - influxdb-client
+    - alembic
+    - python-dotenv
+    - pydantic
+    - prometheus-client
+    - sentry-sdk
+    - pytest
+    - pytest-asyncio
+    - pytest-cov
+    - "dash[testing]"
+    - black
+    - isort
+    - flake8
+    - pre-commit
+    - aiokafka      # Kafka 쓰면
+    - confluent-kafka  # Kafka 대안(환경에 따라 하나만)
