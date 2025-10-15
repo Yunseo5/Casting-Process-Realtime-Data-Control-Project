@@ -1,6 +1,12 @@
 # dashboard/modules/tab_target_operation_manager.py
 from shiny import ui, render
 
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+
+from dashboard.shared import RealTimeStreamer
+
 # 탭별 UI
 tab_ui = ui.page_fluid(
     ui.h2("현장 운영 담당자 탭"),
