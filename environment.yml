@@ -17,6 +17,9 @@ dependencies:
     - dash
     - dash-bootstrap-components
     - plotly
+    - shiny
+    - shinywidgets
+    - shinylive
     - fastapi
     - "uvicorn[standard]"
     - httpx
