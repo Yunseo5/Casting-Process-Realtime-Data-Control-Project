@@ -7,8 +7,8 @@ from pathlib import Path
 
 # 데이터 로드 및 필터링 함수
 def load_and_filter_data(date_start=None, date_end=None):
-    # modules/tab_target_qc_team.py -> modules -> dashboard -> Project root -> data
-    data_path = Path(__file__).parent.parent.parent / "data" / "train.csv"
+    # modules/tab_target_qc_team.py -> modules -> dashboard -> Project root -> data -> raw
+    data_path = Path(__file__).parent.parent.parent / "data" / "raw" / "train.csv"
     df = pd.read_csv(data_path)
     
     # registration_time 컬럼을 datetime으로 변환
@@ -225,8 +225,16 @@ tab_ui = ui.page_fluid(
                 "input.analysis_mode === 'subgroup'",
                 ui.layout_columns(
                     ui.card(
-                        ui.card_header("Subgroup Size (Fixed: n=5)"),
-                        ui.HTML("<p style='text-align: center; font-size: 24px; font-weight: bold; margin: 20px 0;'>n = 5</p>"),
+                        ui.card_header("Subgroup Size"),
+                        ui.input_slider(
+                            "subgroup_size",
+                            "Select Size (n = 1~10)",
+                            min=1,
+                            max=10,
+                            value=5,
+                            step=1,
+                            width="100%"
+                        ),
                     ),
                     ui.card(
                         ui.card_header("Subgroup Range Selection"),
@@ -357,9 +365,9 @@ def tab_server(input, output, session):
             x_label = 'Date'
             title = f'P Control Chart (Date-based)'
         else:
-            # 서브그룹 기반 분석 (n=5 고정)
+            # 서브그룹 기반 분석 (슬라이더로 조정 가능)
             df = load_and_filter_data()
-            subgroup_size = 5
+            subgroup_size = input.subgroup_size()
             
             # 서브그룹 기반 관리도 계산
             subgroup_stats, p_bar, UCL, LCL = calculate_p_chart(df, subgroup_size=subgroup_size)
@@ -370,17 +378,10 @@ def tab_server(input, output, session):
             display_data = subgroup_stats.iloc[start:end]
             x_column = 'subgroup'
             x_label = 'Subgroup Number'
-            title = f'P Control Chart (Subgroup-based, n=5)'
+            title = f'P Control Chart (Subgroup-based, n={subgroup_size})'
         
         # 그래프 생성
         fig, ax = plt.subplots(figsize=(14, 6))
-        
-        # 자동 스케일링 완전 비활성화
-        ax.autoscale(enable=False)
-        
-        # Y축 범위 0~1로 강제 고정
-        ax.set_ylim(0.0, 1.0)
-        ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
         
         # X축 범위 설정
         if len(display_data) > 0 and analysis_mode == "subgroup":
@@ -439,9 +440,6 @@ def tab_server(input, output, session):
         if analysis_mode == "date":
             ax.tick_params(axis='x', rotation=45)
         
-        # Y축 여백 완전 제거
-        ax.margins(y=0)
-        
         plt.tight_layout()
         
         return fig
@@ -472,9 +470,9 @@ def tab_server(input, output, session):
             x_label = 'Date'
             title = f'Xbar Control Chart (Date-based)'
         else:
-            # 서브그룹 기반 분석 (n=5 고정)
+            # 서브그룹 기반 분석 (슬라이더로 조정 가능)
             df = load_and_filter_data()
-            subgroup_size = 5
+            subgroup_size = input.subgroup_size()
             
             # 서브그룹 기반 관리도 계산
             subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = \
@@ -486,7 +484,7 @@ def tab_server(input, output, session):
             display_data = subgroup_stats.iloc[start:end]
             x_column = 'subgroup'
             x_label = 'Subgroup Number'
-            title = f'Xbar Control Chart (Subgroup-based, n=5)'
+            title = f'Xbar Control Chart (Subgroup-based, n={subgroup_size})'
         
         # 그래프 생성
         fig, ax = plt.subplots(figsize=(14, 6))
@@ -574,9 +572,9 @@ def tab_server(input, output, session):
             x_label = 'Date'
             title = f'R Control Chart (Date-based)'
         else:
-            # 서브그룹 기반 분석 (n=5 고정)
+            # 서브그룹 기반 분석 (슬라이더로 조정 가능)
             df = load_and_filter_data()
-            subgroup_size = 5
+            subgroup_size = input.subgroup_size()
             
             # 서브그룹 기반 관리도 계산
             subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = \
@@ -588,7 +586,7 @@ def tab_server(input, output, session):
             display_data = subgroup_stats.iloc[start:end]
             x_column = 'subgroup'
             x_label = 'Subgroup Number'
-            title = f'R Control Chart (Subgroup-based, n=5)'
+            title = f'R Control Chart (Subgroup-based, n={subgroup_size})'
         
         # 그래프 생성
         fig, ax = plt.subplots(figsize=(14, 6))
