@@ -15,6 +15,7 @@ dependencies:
   - asyncpg
   - git
   - matplotlib
+  - seaborn
   - pip:
     - dash
     - dash-bootstrap-components
@@ -41,5 +42,5 @@ dependencies:
     - isort
     - flake8
     - pre-commit
-    - aiokafka      # Kafka 쓰면
-    - confluent-kafka  # Kafka 대안(환경에 따라 하나만)
+    - aiokafka          # Kafka 사용 시
+    - confluent-kafka   # Kafka 대안 (환경에 따라 하나만 사용)
