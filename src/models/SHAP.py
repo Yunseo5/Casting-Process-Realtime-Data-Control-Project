@@ -11,7 +11,7 @@ import shap
 # ---------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_FILE_TRAIN = BASE_DIR / "data" / "processed" / "train_v1_time.csv"
-DATA_FILE_TEST = BASE_DIR / "data" / "processed" / "valid_v1_time.csv"
+DATA_FILE_TEST = BASE_DIR / "data" / "raw" / "test.csv"
 MODEL_OUTPUT = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
 
 # ---------------------------
@@ -28,7 +28,7 @@ train_df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
 test_df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
 
 X_train = train_df.drop(columns=[target_col]).copy()
-X_test = test_df.drop(columns=[target_col]).copy()
+X_test = test_df.copy()
 
 # ---------------------------
 # 전처리 정보 준비
@@ -104,7 +104,7 @@ test_df['top_shap_feature'].value_counts()
 test_df[test_df['pred']==1]['top_shap_feature'].value_counts()
 test_df[test_df['pred']==0]['top_shap_feature'].value_counts()
 
-test_df
+test_df['pred'].value_counts()
 
 # ---------------------------
 # SHAP 시각화 (직관형)
