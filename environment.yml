@@ -44,3 +44,6 @@ dependencies:
     - pre-commit
     - aiokafka          # Kafka 사용 시
     - confluent-kafka   # Kafka 대안 (환경에 따라 하나만 사용)
+    - optuna
+    - imbalanced-learn
+    - lightgbm
