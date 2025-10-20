@@ -16,6 +16,10 @@ from modules.tab_target_ai_engineer import (
     tab_ui as ai_ui,
     tab_server as ai_server,
 )
+from modules.tab_target_log_accumulation import (
+    tab_ui as log_ui,
+    tab_server as log_server,
+)
 
 # -------------------------------------------------------------
 # 탭 정의
@@ -26,6 +30,12 @@ TAB_DEFINITIONS = [
         "label": "현장 운영 담당자",
         "icon": "fa-solid fa-gears",
         "content": operation_ui,
+    },
+    {
+        "id": "log",
+        "label": "로그 누적",
+        "icon": "fa-solid fa-database",
+        "content": log_ui,
     },
     {
         "id": "qc",
@@ -295,6 +305,15 @@ body.sidebar-collapsed .sidebar-toggle-button {
     max-width: 1400px;
     overflow-y: auto;
 }
+
+/* 추가 스타일 */
+.stats-card {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
 </style>
 
 <script>
@@ -309,7 +328,6 @@ body.sidebar-collapsed .sidebar-toggle-button {
                 }
             });
         }
-        // 🔒 스크롤 완전 차단 (렌더링 후 다시 생기는 경우 방지)
         if (sidebar) {
             sidebar.style.overflow = 'hidden';
         }
@@ -445,7 +463,7 @@ app_ui = ui.page_fluid(
 # 서버 로직
 # -------------------------------------------------------------
 def server(input, output, session):
-    # operation 탭용 공유 객체 생성
+    # 공유 객체 생성
     streamer = RealTimeStreamer()
     shared_df = reactive.Value(pd.DataFrame())
     streaming_active = reactive.Value(False)
@@ -464,10 +482,11 @@ def server(input, output, session):
         tab_id = input.active_tab() or DEFAULT_TAB
         return TAB_CONTENT.get(tab_id, TAB_CONTENT[DEFAULT_TAB])
 
-    # 각 탭 서버 호출
-    operation_server(input, output, session, streamer, shared_df, streaming_active)
-    qc_server(input, output, session)
-    ai_server(input, output, session)
+    # 각 탭 서버 호출 (시그니처에 맞게)
+    operation_server(input, output, session, streamer, shared_df, streaming_active)  # 6개
+    log_server(input, output, session, streamer, shared_df, streaming_active)  # 6개
+    qc_server(input, output, session)  # 3개만
+    ai_server(input, output, session)  # 3개만
     
     # 세션 종료 시 정리
     @reactive.effect
