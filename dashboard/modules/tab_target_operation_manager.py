@@ -61,20 +61,6 @@ border:1px solid #e0e0e0;border-radius:12px;box-shadow:0 2px 4px rgba(0,0,0,.05)
 #process_indicator{background:#3B7D23;box-shadow:0 0 20px rgba(59,125,35,.5)}
 #defect_indicator{background:#3B7D23;box-shadow:0 0 20px rgba(59,125,35,.5)}
 .status-indicator-label{font-size:15px;font-weight:700;color:#111;white-space:nowrap}
-.control-section{background:#fff;border-radius:16px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,.08);
-padding:24px 20px 36px 20px;height:170px;min-height:170px;max-height:170px;overflow:hidden}
-.control-buttons-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:22px;
-height:56px;min-height:56px;max-height:56px}
-.btn-enhanced{height:56px;border-radius:14px;font-weight:600;font-size:16px;border:none;display:flex;
-align-items:center;justify-content:center;gap:10px;transition:all .3s;box-shadow:0 4px 12px rgba(0,0,0,.1);white-space:nowrap}
-.btn-enhanced:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.15)}
-.btn-start{background:linear-gradient(135deg,#27ae60 0%,#2ecc71 100%);color:#fff}
-.btn-stop{background:linear-gradient(135deg,#f39c12 0%,#f1c40f 100%);color:#fff}
-.btn-reset{background:linear-gradient(135deg,#e74c3c 0%,#c0392b 100%);color:#fff}
-.progress-bar{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:12px;padding:0 24px;
-color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;
-height:56px;min-height:56px;max-height:56px;width:100%;overflow:hidden}
-.progress-bar>div{width:100%;text-align:center;white-space:nowrap}
 .custom-card{background:#fff;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .card-header-title{font-size:18px;font-weight:700;color:#2A2D30;margin-bottom:20px;padding-bottom:12px;
 border-bottom:2px solid #e0e0e0;height:40px;min-height:40px;max-height:40px;overflow:hidden}
@@ -119,13 +105,6 @@ tab_ui = ui.page_fluid(
                          create_light("defect_indicator", "불량 발생"),
                          class_="status-panel"), style="flex:1"),
             style="display:flex;gap:24px;margin-bottom:24px"),
-        ui.div(
-            ui.div(ui.div(ui.input_action_button("tab1_start_btn", ui.HTML('<i class="fa-solid fa-play"></i> 시작'), class_="btn-enhanced btn-start")),
-                   ui.div(ui.input_action_button("tab1_stop_btn", ui.HTML('<i class="fa-solid fa-pause"></i> 정지'), class_="btn-enhanced btn-stop")),
-                   ui.div(ui.input_action_button("tab1_reset_btn", ui.HTML('<i class="fa-solid fa-rotate-right"></i> 리셋'), class_="btn-enhanced btn-reset")),
-                   class_="control-buttons-grid"),
-            ui.div(ui.output_ui("tab1_progress_text"), class_="progress-bar"),
-            class_="control-section"),
         ui.div(ui.div("검색 및 설정", class_="card-header-title"),
                ui.layout_columns(
                    ui.input_selectize("mold_code_select", "Mold Code 검색", choices=MOLD_CODES, selected=None, multiple=False),
@@ -142,25 +121,6 @@ tab_ui = ui.page_fluid(
 
 # SERVER
 def tab_server(input, output, session, streamer, shared_df, streaming_active):
-    
-    @reactive.effect
-    @reactive.event(input.tab1_start_btn)
-    def _start():
-        streamer.start_stream()
-        streaming_active.set(True)
-
-    @reactive.effect
-    @reactive.event(input.tab1_stop_btn)
-    def _stop():
-        streamer.stop_stream()
-        streaming_active.set(False)
-
-    @reactive.effect
-    @reactive.event(input.tab1_reset_btn)
-    def _reset():
-        streamer.reset_stream()
-        shared_df.set(pd.DataFrame())
-        streaming_active.set(False)
 
     @output
     @render.ui
@@ -183,13 +143,6 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
             return ui.h1("0.0%", class_="kpi-value")
         working = (df['working'] == '가동').sum()
         return ui.h1(f"{(working/len(df)*100):.1f}%", class_="kpi-value")
-
-    @output
-    @render.ui
-    def tab1_progress_text():
-        _ = shared_df.get()
-        status = "진행 중" if streaming_active.get() else "정지"
-        return ui.div(f'상태: {status} | 진행률: {streamer.progress():.1f}%')
 
     @output
     @render.plot
