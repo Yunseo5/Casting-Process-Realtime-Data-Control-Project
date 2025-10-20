@@ -1,6 +1,9 @@
 # app.py
 from pathlib import Path
-from shiny import App, render, ui
+from shiny import App, render, ui, reactive
+from shared import RealTimeStreamer
+import pandas as pd
+
 from modules.tab_target_operation_manager import (
     tab_ui as operation_ui,
     tab_server as operation_server,
@@ -442,14 +445,34 @@ app_ui = ui.page_fluid(
 # 서버 로직
 # -------------------------------------------------------------
 def server(input, output, session):
+    # operation 탭용 공유 객체 생성
+    streamer = RealTimeStreamer()
+    shared_df = reactive.Value(pd.DataFrame())
+    streaming_active = reactive.Value(False)
+    
+    # 주기적 데이터 업데이트 (0.5초마다)
+    @reactive.effect
+    def _():
+        reactive.invalidate_later(0.5)
+        if streaming_active.get():
+            current_data = streamer.get_current_data()
+            shared_df.set(current_data)
+    
+    # 탭 콘텐츠 렌더링
     @render.ui
     def active_tab_content():
         tab_id = input.active_tab() or DEFAULT_TAB
         return TAB_CONTENT.get(tab_id, TAB_CONTENT[DEFAULT_TAB])
 
-    operation_server(input, output, session)
+    # 각 탭 서버 호출
+    operation_server(input, output, session, streamer, shared_df, streaming_active)
     qc_server(input, output, session)
     ai_server(input, output, session)
+    
+    # 세션 종료 시 정리
+    @reactive.effect
+    def _():
+        session.on_ended(lambda: streamer.cleanup())
 
 # -------------------------------------------------------------
 # 앱 실행
