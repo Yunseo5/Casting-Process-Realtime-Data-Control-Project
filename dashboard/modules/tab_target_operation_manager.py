@@ -40,7 +40,7 @@ VARIABLES = {
     "EMS_operation_time": "EMS 작동 시간 (EMS_operation_time)"
 }
 
-# CSS - 스크롤 안정 + 여백 최소화
+# CSS
 STYLES = """
 .main-container{max-width:1400px;margin:0 auto;padding:20px 0}
 .kpi-card{background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:30px 20px;text-align:center;
@@ -58,38 +58,34 @@ border:1px solid #e0e0e0;border-radius:12px;box-shadow:0 2px 4px rgba(0,0,0,.05)
 .status-row{display:flex;align-items:center;gap:16px;width:100%}
 .status-indicator-circle{width:50px;height:50px;border-radius:50%;border:3px solid #333;flex-shrink:0}
 #lof_indicator{background:#C00000;box-shadow:0 0 22px rgba(192,0,0,.55)}
-#process_indicator{background:#3B7D23;box-shadow:0 0 20px rgba(59,125,35,.5)}
 #defect_indicator{background:#3B7D23;box-shadow:0 0 20px rgba(59,125,35,.5)}
 .status-indicator-label{font-size:15px;font-weight:700;color:#111;white-space:nowrap}
-.control-section{background:#fff;border-radius:16px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,.08);
-padding:24px 20px 36px 20px;height:170px;min-height:170px;max-height:170px;overflow:hidden}
-.control-buttons-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:22px;
-height:56px;min-height:56px;max-height:56px}
-.btn-enhanced{height:56px;border-radius:14px;font-weight:600;font-size:16px;border:none;display:flex;
-align-items:center;justify-content:center;gap:10px;transition:all .3s;box-shadow:0 4px 12px rgba(0,0,0,.1);white-space:nowrap}
-.btn-enhanced:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.15)}
-.btn-start{background:linear-gradient(135deg,#27ae60 0%,#2ecc71 100%);color:#fff}
-.btn-stop{background:linear-gradient(135deg,#f39c12 0%,#f1c40f 100%);color:#fff}
-.btn-reset{background:linear-gradient(135deg,#e74c3c 0%,#c0392b 100%);color:#fff}
-.progress-bar{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:12px;padding:0 24px;
-color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;justify-content:center;
-height:56px;min-height:56px;max-height:56px;width:100%;overflow:hidden}
-.progress-bar>div{width:100%;text-align:center;white-space:nowrap}
+.control-buttons-grid{display:flex;justify-content:flex-start;align-items:flex-start;gap:20px;margin-bottom:22px;padding-left:0px;position:sticky;top:200px;z-index:100}
+.btn-group{display:flex;flex-direction:column;align-items:center;gap:4px}
+.btn-enhanced{width:70px;height:70px;border-radius:8px;border:2px solid #333;background:#fff;color:#333;
+font-weight:600;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+transition:all .2s;box-shadow:0 2px 6px rgba(0,0,0,0.1)}
+.btn-enhanced:hover{background:#f5f5f5;transform:translateY(-2px)}
 .custom-card{background:#fff;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .card-header-title{font-size:18px;font-weight:700;color:#2A2D30;margin-bottom:20px;padding-bottom:12px;
-border-bottom:2px solid #e0e0e0;height:40px;min-height:40px;max-height:40px;overflow:hidden}
+border-bottom:2px solid #e0e0e0}
 .chart-container{height:450px;min-height:450px;max-height:450px;width:100%;position:relative;overflow:hidden}
 .table-container{width:100%;overflow-x:auto;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px;
 height:480px;min-height:480px;max-height:480px}
 .table-container::-webkit-scrollbar{height:12px;width:12px}
 .table-container::-webkit-scrollbar-track{background:#f1f1f1;border-radius:6px}
 .table-container::-webkit-scrollbar-thumb{background:#888;border-radius:6px}
-.table-container::-webkit-scrollbar-thumb:hover{background:#555}
 .shiny-data-grid{font-size:14px!important;width:100%;border-collapse:collapse}
 .shiny-data-grid thead{background:linear-gradient(135deg,#4A90E2 0%,#357ABD 100%);position:sticky;top:0;z-index:10}
 .shiny-data-grid thead th{font-weight:600;padding:14px 12px;color:#2A2D30;white-space:nowrap}
 .shiny-data-grid tbody tr:hover{background:#f8f9fa}
 .shiny-data-grid tbody td{padding:12px;border-bottom:1px solid #ecf0f1;white-space:nowrap}
+.toggle-switch{width:40px;height:24px;background:#d0d0d0;border-radius:12px;position:relative;
+transition:background 0.3s;border:none;display:block;cursor:pointer}
+.toggle-switch.active{background:#2c3e50}
+.toggle-circle{position:absolute;width:16px;height:16px;background:white;border-radius:50%;top:4px;left:4px;
+transition:left 0.3s;box-shadow:0 2px 4px rgba(0,0,0,0.2)}
+.toggle-switch.active .toggle-circle{left:20px}
 """
 
 # 헬퍼 함수
@@ -115,22 +111,17 @@ tab_ui = ui.page_fluid(
                 create_kpi("설비 가동률", "kpi_uptime", "현재 가동 상태", "navy-line"),
                 col_widths=[4,4,4]), style="flex:3"),
             ui.div(ui.div(create_light("lof_indicator", "이상치 발생"),
-                         create_light("process_indicator", "관리도 이상"),
                          create_light("defect_indicator", "불량 발생"),
                          class_="status-panel"), style="flex:1"),
             style="display:flex;gap:24px;margin-bottom:24px"),
-        ui.div(
-            ui.div(ui.div(ui.input_action_button("tab1_start_btn", ui.HTML('<i class="fa-solid fa-play"></i> 시작'), class_="btn-enhanced btn-start")),
-                   ui.div(ui.input_action_button("tab1_stop_btn", ui.HTML('<i class="fa-solid fa-pause"></i> 정지'), class_="btn-enhanced btn-stop")),
-                   ui.div(ui.input_action_button("tab1_reset_btn", ui.HTML('<i class="fa-solid fa-rotate-right"></i> 리셋'), class_="btn-enhanced btn-reset")),
-                   class_="control-buttons-grid"),
-            ui.div(ui.output_ui("tab1_progress_text"), class_="progress-bar"),
-            class_="control-section"),
         ui.div(ui.div("검색 및 설정", class_="card-header-title"),
-               ui.layout_columns(
-                   ui.input_selectize("mold_code_select", "Mold Code 검색", choices=MOLD_CODES, selected=None, multiple=False),
-                   ui.input_selectize("variable_select", "변수 설정", choices=VARIABLES, selected=None, multiple=False),
-                   col_widths=[6,6]), class_="custom-card"),
+               ui.div(ui.p("Mold Code 검색", style="font-weight:600;margin-bottom:12px;margin-top:16px"),
+                      ui.div(id="mold-code-toggles", style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px")),
+               ui.div(ui.p("변수 설정", style="font-weight:600;margin-bottom:12px;margin-top:16px"),
+                      ui.div(id="variable-toggles", style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px")),
+               ui.tags.div(ui.input_radio_buttons("mold_code_select", None, choices=MOLD_CODES, selected=None, inline=False), style="display:none"),
+               ui.tags.div(ui.input_radio_buttons("variable_select", None, choices=VARIABLES, selected=None, inline=False), style="display:none"),
+               class_="custom-card"),
         ui.div(ui.div("런 차트", class_="card-header-title"),
                ui.div(ui.output_plot("run_chart", height="450px"), class_="chart-container"),
                class_="custom-card"),
@@ -138,29 +129,53 @@ tab_ui = ui.page_fluid(
                ui.div(ui.output_data_frame("tab1_table_realtime"), class_="table-container"),
                class_="custom-card"),
         class_="main-container"),
+    ui.tags.script("""
+    $(document).ready(function(){
+      var codes = ['8412', '8917', '8722', '8413', '8576'];
+      var toggleHTML = '';
+      codes.forEach(function(code, idx){
+        toggleHTML += '<div style="text-align:center"><label style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;margin:0"><input type="radio" name="mold_toggle" value="' + code + '" ' + (idx === 0 ? 'checked' : '') + ' style="display:none"><div class="toggle-switch ' + (idx === 0 ? 'active' : '') + '"><div class="toggle-circle"></div></div></label><span style="font-size:11px">' + code + '</span></div>';
+      });
+      $('#mold-code-toggles').html(toggleHTML);
+      
+      $(document).on('change', 'input[name="mold_toggle"]', function(){
+        $('input[name="mold_toggle"]').each(function(){
+          if(this.checked){
+            $(this).closest('label').find('.toggle-switch').addClass('active');
+            $('#mold_code_select').val(this.value).trigger('change');
+          } else {
+            $(this).closest('label').find('.toggle-switch').removeClass('active');
+          }
+        });
+      });
+
+      var variables = """ + str(list(VARIABLES.keys())) + """;
+      var variableLabels = """ + str(list(VARIABLES.values())) + """;
+      var variableToggleHTML = '';
+      variables.forEach(function(varKey, idx){
+        var labelText = variableLabels[idx].split(' (')[0];
+        variableToggleHTML += '<div style="text-align:center"><label style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;margin:0"><input type="radio" name="variable_toggle" value="' + varKey + '" ' + (idx === 0 ? 'checked' : '') + ' style="display:none"><div class="toggle-switch ' + (idx === 0 ? 'active' : '') + '"><div class="toggle-circle"></div></div></label><span style="font-size:11px">' + labelText + '</span></div>';
+      });
+      $('#variable-toggles').html(variableToggleHTML);
+      
+      $(document).on('change', 'input[name="variable_toggle"]', function(){
+        $('input[name="variable_toggle"]').each(function(){
+          if(this.checked){
+            $(this).closest('label').find('.toggle-switch').addClass('active');
+            $('#variable_select').val(this.value).trigger('change');
+          } else {
+            $(this).closest('label').find('.toggle-switch').removeClass('active');
+          }
+        });
+      });
+    });
+    """),
 )
 
 # SERVER
 def tab_server(input, output, session, streamer, shared_df, streaming_active):
     
-    @reactive.effect
-    @reactive.event(input.tab1_start_btn)
-    def _start():
-        streamer.start_stream()
-        streaming_active.set(True)
-
-    @reactive.effect
-    @reactive.event(input.tab1_stop_btn)
-    def _stop():
-        streamer.stop_stream()
-        streaming_active.set(False)
-
-    @reactive.effect
-    @reactive.event(input.tab1_reset_btn)
-    def _reset():
-        streamer.reset_stream()
-        shared_df.set(pd.DataFrame())
-        streaming_active.set(False)
+    # 탭의 로컬 버튼은 제거하고, 공유 객체만 사용
 
     @output
     @render.ui
@@ -183,13 +198,6 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
             return ui.h1("0.0%", class_="kpi-value")
         working = (df['working'] == '가동').sum()
         return ui.h1(f"{(working/len(df)*100):.1f}%", class_="kpi-value")
-
-    @output
-    @render.ui
-    def tab1_progress_text():
-        _ = shared_df.get()
-        status = "진행 중" if streaming_active.get() else "정지"
-        return ui.div(f'상태: {status} | 진행률: {streamer.progress():.1f}%')
 
     @output
     @render.plot
