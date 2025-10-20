@@ -26,8 +26,24 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 LIGHTGBM_MODEL = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
 TEST_FEATURE_FILE = BASE_DIR / "data" / "raw" / "test.csv"
 TEST_LABEL_FILE = BASE_DIR / "data" / "raw" / "test_label.csv"
+ISOLATION_MODEL_FILE = BASE_DIR / "data" / "intermin" / "isolation_forest_by_mold_code.pkl"
 TARGET_COLUMN = "passorfail"
 DROP_COLUMNS = ["date", "time", "Unnamed: 0"]
+ISO_DROP_COLUMNS = [
+    "id",
+    "line",
+    "name",
+    "mold_name",
+    "time",
+    "date",
+    "working",
+    "emergency_stop",
+    "registration_time",
+    "tryshot_signal",
+    "mold_code",
+    "heating_furnace",
+    TARGET_COLUMN,
+]
 CLASS_LABELS = ["정상", "불량"]
 DEFAULT_FONT = "Malgun Gothic"
 
@@ -209,6 +225,86 @@ def _model_evaluation() -> Tuple[np.ndarray, pd.DataFrame]:
     return cm, metrics
 
 
+@lru_cache(maxsize=1)
+def _load_isolation_artifact() -> dict:
+    if not ISOLATION_MODEL_FILE.exists():
+        raise FileNotFoundError(f"Isolation Forest 모델 파일을 찾을 수 없습니다: {ISOLATION_MODEL_FILE}")
+    try:
+        return joblib.load(ISOLATION_MODEL_FILE)
+    except Exception:
+        import pickle
+
+        with open(ISOLATION_MODEL_FILE, "rb") as f:
+            return pickle.load(f)
+
+
+@lru_cache(maxsize=1)
+def _isolation_predictions() -> Tuple[np.ndarray, np.ndarray]:
+    artifact = _load_isolation_artifact()
+    models = artifact.get("models", {})
+    imputers = artifact.get("imputers", {})
+    feature_columns = artifact.get("feature_columns", {})
+    thresholds = artifact.get("thresholds", {})
+
+    df = _load_test_dataframe().copy()
+    if "mold_code" in df.columns:
+        df.loc[:, "mold_code"] = (
+            df["mold_code"].astype(str)
+            .fillna("")
+            .map(lambda v: "UNKNOWN" if not str(v).strip() else str(v).strip())
+        )
+    else:
+        df.loc[:, "mold_code"] = "UNKNOWN"
+
+    actual = df[TARGET_COLUMN].astype("Int64").fillna(0).astype(int).to_numpy()
+    predictions = np.zeros(len(df), dtype=int)
+
+    if not models:
+        return actual, predictions
+
+    for mold_code, subset in df.groupby("mold_code", sort=False):
+        model = models.get(mold_code)
+        imputer = imputers.get(mold_code)
+        cols = feature_columns.get(mold_code, [])
+        threshold = thresholds.get(mold_code, 0.0)
+
+        if model is None or imputer is None or not cols:
+            continue
+
+        subset_features = (
+            subset.drop(columns=ISO_DROP_COLUMNS, errors="ignore")
+            .apply(pd.to_numeric, errors="coerce")
+            .reindex(columns=cols)
+        )
+
+        try:
+            transformed = imputer.transform(subset_features)
+            scores = model.decision_function(transformed)
+        except Exception:
+            continue
+
+        subset_preds = (scores < threshold).astype(int)
+        predictions[subset.index.to_numpy()] = subset_preds
+
+    return actual, predictions
+
+
+@lru_cache(maxsize=1)
+def _isolation_evaluation() -> Tuple[np.ndarray, pd.DataFrame]:
+    y_true, y_pred = _isolation_predictions()
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    metrics = pd.DataFrame(
+        [
+            {"지표": "정확도", "값": accuracy_score(y_true, y_pred)},
+            {"지표": "정밀도", "값": precision_score(y_true, y_pred, zero_division=0)},
+            {"지표": "재현율", "값": recall_score(y_true, y_pred, zero_division=0)},
+            {"지표": "F1-score", "값": f1_score(y_true, y_pred, zero_division=0)},
+        ]
+    )
+    metrics["값"] = metrics["값"].map(lambda x: f"{x:.3f}")
+    return cm, metrics
+
+
 # PDP에서는 수치형 컬럼만 사용
 PDP_FEATURES = _numeric_columns()
 
@@ -368,6 +464,31 @@ def _top_feature_counts(start_date: str | None, end_date: str | None) -> pd.Data
 
 # 탭별 UI ----------------------------------------------------------------------
 tab_ui = ui.page_fluid(
+    ui.layout_column_wrap(
+        ui.card(
+            ui.input_action_button(
+                "btn_stream_start",
+                "스트리밍 시작",
+                class_="w-100 btn-primary",
+            ),
+        ),
+        ui.card(
+            ui.input_action_button(
+                "btn_stream_stop",
+                "스트리밍 중지",
+                class_="w-100 btn-secondary",
+            ),
+        ),
+        ui.card(
+            ui.input_action_button(
+                "btn_stream_reset",
+                "스트리밍 초기화",
+                class_="w-100 btn-warning",
+            ),
+        ),
+        width=1 / 3,
+        gap="1rem",
+    ),
     ui.navset_tab(
         ui.nav_panel(
             "MODEL",
@@ -380,7 +501,11 @@ tab_ui = ui.page_fluid(
                     ui.card_header("성능지표"),
                     ui.output_table("table_model_metrics"),
                 ),
-                width=1 / 2,
+                ui.card(
+                    ui.card_header("Isolation Forest 혼동행렬"),
+                    ui.output_plot("plot_isolation_confusion", height="360px"),
+                ),
+                width=1 / 3,
                 gap="1rem",
             ),
         ),
@@ -416,8 +541,6 @@ tab_ui = ui.page_fluid(
         ),
     ),
 )
-
-
 # 탭별 서버 --------------------------------------------------------------------
 def tab_server(input, output, session):
     @render.plot
@@ -454,6 +577,33 @@ def tab_server(input, output, session):
             return metrics
         except (FileNotFoundError, KeyError) as err:
             return pd.DataFrame([{"지표": "오류", "값": str(err)}])
+
+    @render.plot
+    def plot_isolation_confusion():
+        fig, ax = plt.subplots(figsize=(4, 3.8))
+        try:
+            cm, _ = _isolation_evaluation()
+            im = ax.imshow(cm, cmap="Purples")
+            ax.set_xticks([0, 1], CLASS_LABELS)
+            ax.set_yticks([0, 1], CLASS_LABELS)
+            ax.set_xlabel("예측")
+            ax.set_ylabel("실제")
+            for (i, j), value in np.ndenumerate(cm):
+                ax.text(j, i, int(value), ha="center", va="center", fontsize=12)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            fig.tight_layout()
+        except (FileNotFoundError, KeyError) as err:
+            ax.set_axis_off()
+            ax.text(
+                0.5,
+                0.5,
+                str(err),
+                ha="center",
+                va="center",
+                fontsize=11,
+                wrap=True,
+            )
+        return fig
 
     @render.plot
     def plot_pdp_feature():
@@ -553,7 +703,8 @@ def tab_server(input, output, session):
             ax.set_xlabel("건수")
             ax.set_ylabel("변수")
             ax.grid(alpha=0.3, axis="x")
-            ax.set_xlim(0, max(x_values) * 1.08)
+            x_max = max(x_values)
+            ax.set_xlim(0, x_max * 1.25 if x_max > 0 else 1)
             fig.subplots_adjust(left=0.42, right=0.98, top=0.95, bottom=0.15)
         except (FileNotFoundError, KeyError, RuntimeError) as err:
             ax.set_axis_off()
