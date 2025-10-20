@@ -117,7 +117,7 @@ def objective(trial):
         "reg_lambda": trial.suggest_loguniform("reg_lambda", 1e-8, 10.0),
     }
 
-    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=False)
     fold_f1s = []
 
     for tr_idx, val_idx in skf.split(X_train, y_train):
