@@ -844,13 +844,12 @@ ui.tags.style("""
         ui.panel_conditional(
             "input.analysis_mode === 'subgroup'",
             ui.layout_columns(
-                ui.input_slider(
+                ui.input_numeric(
                     "subgroup_size",
-                    "서브그룹 크기 (n = 1~10)",
-                    min=1,
-                    max=10,
-                    value=5,
-                    step=1,
+                    "서브그룹 크기 (고정 n=100)",
+                    value=100,
+                    min=100,
+                    max=100,
                     width="100%"
                 ),
                 ui.input_numeric("subgroup_start", "시작 서브그룹", value=0, min=0, width="100%"),
@@ -935,7 +934,8 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
             subgroup_end_value = input.subgroup_end()
             variable = input.xbar_variable()
 
-        subgroup_size = int(subgroup_size_value) if subgroup_size_value is not None else 5
+        # Step 2: 서브그룹 크기 n=100 고정
+        subgroup_size = 100
         subgroup_start = int(subgroup_start_value) if subgroup_start_value is not None else 0
         subgroup_end = int(subgroup_end_value) if subgroup_end_value is not None else subgroup_start + 100
 
