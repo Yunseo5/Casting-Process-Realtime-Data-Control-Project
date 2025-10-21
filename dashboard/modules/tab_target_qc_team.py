@@ -861,10 +861,10 @@ ui.tags.style("""
                     "mold_code",
                     "금형 코드",
                     choices=MOLD_CODE_CHOICES,
-                    multiple=True,
+                    multiple=False,
                     options={
                         "placeholder": "금형 코드를 선택하세요",
-                        "plugins": ["remove_button"]
+                        "dropdownParent": "body"
                     }
                 ),
                 ui.input_selectize(
@@ -885,19 +885,17 @@ ui.tags.style("""
         ),
         ui.panel_conditional(
             "input.analysis_mode === 'subgroup'",
-            ui.layout_columns(
-                ui.input_numeric(
-                    "subgroup_size",
-                    "서브그룹 크기 (고정 n=100)",
-                    value=100,
-                    min=100,
-                    max=100,
-                    width="100%"
+            ui.div(
+                ui.layout_columns(
+                    ui.input_numeric("subgroup_start", "시작 서브그룹", value=0, min=0, width="100%"),
+                    ui.input_numeric("subgroup_end", "종료 서브그룹", value=100, min=1, width="100%"),
+                    col_widths=[6, 6],
+                    class_="align-items-end"
                 ),
-                ui.input_numeric("subgroup_start", "시작 서브그룹", value=0, min=0, width="100%"),
-                ui.input_numeric("subgroup_end", "종료 서브그룹", value=100, min=1, width="100%"),
-                col_widths=[6, 3, 3],
-                class_="align-items-end"
+                ui.div(
+                    ui.tags.small("서브그룹 기반 분석은 서브그룹 크기 n=100으로 고정됩니다."),
+                    class_="text-muted mt-2"
+                )
             )
         ),
         ui.panel_conditional(
@@ -969,9 +967,13 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
         with reactive.isolate():
             analysis_mode = input.analysis_mode()
             mold_selection = input.mold_code()
-            mold_codes = list(mold_selection) if mold_selection else []
+            if mold_selection is None or mold_selection == "":
+                mold_codes = []
+            elif isinstance(mold_selection, (list, tuple)):
+                mold_codes = list(mold_selection)
+            else:
+                mold_codes = [str(mold_selection)]
             date_range = input.date_range()
-            subgroup_size_value = input.subgroup_size()
             subgroup_start_value = input.subgroup_start()
             subgroup_end_value = input.subgroup_end()
             variable = input.xbar_variable()
