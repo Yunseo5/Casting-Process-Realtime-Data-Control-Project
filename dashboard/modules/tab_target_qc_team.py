@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+from datetime import datetime
 
 try:
     import joblib  # type: ignore
@@ -16,7 +17,8 @@ except ImportError:
     shap = None
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_PATH = BASE_DIR / "data" / "raw" / "train.csv"
+RAW_DIR = BASE_DIR / "data" / "raw"
+DATA_PATH = RAW_DIR / "train.csv"
 MODEL_ARTIFACT_PATH = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
 PI_TABLE_PATH = BASE_DIR / "reports" / "permutation_importance_valid.csv"
 
@@ -34,7 +36,11 @@ CPK_STATUS_RULES = [
 
 def read_raw_data():
     df = pd.read_csv(DATA_PATH)
-    df['registration_time'] = pd.to_datetime(df['registration_time'])
+    if 'registration_time' in df.columns:
+        df['registration_time'] = pd.to_datetime(df['registration_time'])
+    elif 'time' in df.columns:
+        # 표준화: registration_time 존재하도록 보정
+        df['registration_time'] = pd.to_datetime(df['time'], errors='coerce')
     return df
 
 
@@ -82,6 +88,60 @@ def load_and_filter_data(date_start=None, date_end=None, mold_codes=None):
         df = df[df['registration_time'].dt.date <= pd.to_datetime(date_end).date()]
 
     return df
+
+
+# -------------------------
+# Step 1: 스냅샷 생성 유틸리티
+# -------------------------
+SNAPSHOT_CUTOFF = datetime.strptime("2019-03-18", "%Y-%m-%d").date()
+
+def _read_csv_with_time_guard(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+    # time/registration_time 둘 다 대응
+    if 'time' in df.columns:
+        t = pd.to_datetime(df['time'], errors='coerce')
+    elif 'registration_time' in df.columns:
+        t = pd.to_datetime(df['registration_time'], errors='coerce')
+    else:
+        # 시간 컬럼 없으면 필터 불가
+        return pd.DataFrame()
+    dates = t.dt.date
+    mask = (dates < SNAPSHOT_CUTOFF)
+    hist = df.loc[mask].copy()
+    # 일관성: registration_time 필드 보정
+    if 'registration_time' not in hist.columns:
+        hist['registration_time'] = t.loc[mask]
+    return hist.reset_index(drop=True)
+
+def build_qc_snapshot(streamer_current: pd.DataFrame) -> pd.DataFrame:
+    """과거(train+test, cutoff 이전) + 현재까지 스트리밍 데이터 결합 스냅샷 생성."""
+    train_path = RAW_DIR / 'train.csv'
+    test_path = RAW_DIR / 'test.csv'
+    hist_train = _read_csv_with_time_guard(train_path)
+    hist_test = _read_csv_with_time_guard(test_path)
+    past_df = pd.concat([hist_train, hist_test], ignore_index=True, sort=False)
+
+    # 일관성: registration_time 표준화
+    if 'registration_time' not in past_df.columns and 'time' in past_df.columns:
+        past_df['registration_time'] = pd.to_datetime(past_df['time'], errors='coerce')
+
+    # streamer 데이터도 registration_time 보정
+    cur_df = streamer_current.copy() if streamer_current is not None else pd.DataFrame()
+    if not cur_df.empty and 'registration_time' not in cur_df.columns:
+        if 'time' in cur_df.columns:
+            cur_df['registration_time'] = pd.to_datetime(cur_df['time'], errors='coerce')
+
+    # 결합
+    snapshot = pd.concat([past_df, cur_df], ignore_index=True, sort=False)
+    # 시간 정렬(가능한 경우)
+    if 'registration_time' in snapshot.columns:
+        snapshot = snapshot.sort_values('registration_time').reset_index(drop=True)
+    return snapshot
 
 
 def load_model_artifact():
@@ -722,6 +782,7 @@ ui.tags.style("""
     }
     """),
 
+    ui.output_ui("qc_snapshot_status"),
     ui.output_ui("mci_overview"),
     
     ui.card(
@@ -845,7 +906,23 @@ ui.tags.style("""
 )
 
 # 탭별 서버
-def tab_server(input, output, session):
+def tab_server(input, output, session, streamer=None, shared_df: reactive.Value | None = None, streaming_active: reactive.Value | None = None):
+    # 스냅샷 상태 (탭 3 체류 동안 고정)
+    snapshot_df = reactive.Value(pd.DataFrame())
+    snapshot_info = reactive.Value("")
+
+    @reactive.effect
+    def _capture_snapshot_on_tab_entry():
+        active = input.active_tab()
+        # 탭 3(qc) 진입 시 1회 캡처
+        if active == 'qc':
+            current_stream = shared_df.get() if shared_df is not None else pd.DataFrame()
+            snap = build_qc_snapshot(current_stream)
+            snapshot_df.set(snap)
+            # 정보 문자열 구성
+            past_count = len(snap) - (len(current_stream) if isinstance(current_stream, pd.DataFrame) else 0)
+            info = f"스냅샷 고정: 총 {len(snap):,}행 (과거≈{past_count:,} + 스트리밍≈{len(current_stream):,})"
+            snapshot_info.set(info)
     
     def current_filters():
         with reactive.isolate():
@@ -871,6 +948,13 @@ def tab_server(input, output, session):
             "subgroup_end": subgroup_end,
             "variable": variable,
         }
+
+    @render.ui
+    def qc_snapshot_status():
+        text = snapshot_info.get()
+        if not text:
+            return ui.div()
+        return ui.div(ui.HTML(f'<span style="font-weight:600; color:#6c757d;">{text}</span>'), class_="mb-2")
 
     @reactive.Calc
     def mci_dataset():
