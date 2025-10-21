@@ -21,6 +21,7 @@ RAW_DIR = BASE_DIR / "data" / "raw"
 DATA_PATH = RAW_DIR / "train.csv"
 MODEL_ARTIFACT_PATH = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
 PI_TABLE_PATH = BASE_DIR / "reports" / "permutation_importance_valid.csv"
+STABLE_BASELINE_FILE = BASE_DIR / "reports" / "관리도평균,표준편차.csv"
 
 PDP_GRID_SIZE = 15
 ICE_SAMPLE_SIZE = 25
@@ -88,6 +89,47 @@ def load_and_filter_data(date_start=None, date_end=None, mold_codes=None):
         df = df[df['registration_time'].dt.date <= pd.to_datetime(date_end).date()]
 
     return df
+
+# -------------------------
+# 안정상태 기준 로더 (mean/std)
+# -------------------------
+_STABLE_BASELINE_CACHE = None
+
+def load_stable_baseline_df() -> pd.DataFrame:
+    global _STABLE_BASELINE_CACHE
+    if _STABLE_BASELINE_CACHE is not None:
+        return _STABLE_BASELINE_CACHE
+    if not STABLE_BASELINE_FILE.exists():
+        _STABLE_BASELINE_CACHE = pd.DataFrame(columns=["mold_code", "variable", "mean", "std"])
+        return _STABLE_BASELINE_CACHE
+    try:
+        df = pd.read_csv(STABLE_BASELINE_FILE, encoding="utf-8-sig")
+    except Exception:
+        try:
+            df = pd.read_csv(STABLE_BASELINE_FILE)
+        except Exception:
+            df = pd.DataFrame(columns=["mold_code", "variable", "mean", "std"])
+    # 필요한 컬럼만 유지
+    keep = [c for c in ["mold_code", "variable", "mean", "std"] if c in df.columns]
+    df = df[keep].copy()
+    _STABLE_BASELINE_CACHE = df
+    return _STABLE_BASELINE_CACHE
+
+def get_baseline_for(mold_code: str, variable: str):
+    df = load_stable_baseline_df()
+    if df.empty:
+        return None
+    try:
+        row = df[(df["mold_code"].astype(str) == str(mold_code)) & (df["variable"].astype(str) == str(variable))]
+        if row.empty:
+            return None
+        mean = float(row.iloc[0]["mean"]) if "mean" in row.columns else None
+        std = float(row.iloc[0]["std"]) if "std" in row.columns else None
+        if mean is None or std is None:
+            return None
+        return {"mean": mean, "std": std}
+    except Exception:
+        return None
 
 
 # -------------------------
@@ -1162,6 +1204,9 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
         variable_label = VARIABLE_LABELS.get(variable, variable)
         mold_codes = filters["mold_codes"] or None
         
+        baseline_overridden = False
+        baseline_note = None
+
         if analysis_mode == "date":
             date_range = filters["date_range"]
             date_start = date_range[0] if date_range else None
@@ -1188,7 +1233,20 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
             x_column = 'subgroup'
             x_label = '서브그룹 번호'
             title = f'Xbar 관리도 (서브그룹 기반, n={subgroup_size})'
-        
+
+        # 안정상태 기준이 있으면 Xbar 관리한계를 mean±3*std로 대체
+        # mold_code가 단일 선택일 때만 적용 (여러 개면 애매하여 적용 보류)
+        if mold_codes and len(mold_codes) == 1:
+            baseline = get_baseline_for(mold_codes[0], variable)
+            if baseline and np.isfinite(baseline["mean"]) and np.isfinite(baseline["std"]):
+                mean0 = baseline["mean"]
+                std0 = max(float(baseline["std"]), 1e-12)
+                xbar_bar = float(mean0)
+                UCL_xbar = float(mean0 + 3.0 * std0)
+                LCL_xbar = float(mean0 - 3.0 * std0)
+                baseline_overridden = True
+                baseline_note = f"(안정기준 적용: μ={mean0:.4f}, σ={std0:.4f})"
+
         fig, ax = plt.subplots(figsize=(14, 6))
         
         warn_upper_xbar = xbar_bar + (UCL_xbar - xbar_bar) * 2/3
@@ -1226,7 +1284,10 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
         
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel(f'{variable_label} - 평균', fontsize=12, fontweight='bold')
-        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        if baseline_overridden and baseline_note:
+            ax.set_title(f"{title} {baseline_note}", fontsize=14, fontweight='bold', pad=20)
+        else:
+            ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
         ax.legend(
             loc='upper center',
             bbox_to_anchor=(0.5, -0.22),
