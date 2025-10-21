@@ -6,7 +6,7 @@ from pathlib import Path
 try:
     import shap  # type: ignore
     HAS_SHAP = True
-except Exception:  # ImportError or runtime import issues
+except Exception:
     shap = None  # type: ignore
     HAS_SHAP = False
 import matplotlib
@@ -40,7 +40,7 @@ class Config:
     def __post_init__(self):
         self.DROP_COLUMNS = ['line', 'name', 'mold_name', 'date', 'time', 'Unnamed: 0', 'id']
 config = Config()
-
+ 
 COLUMN_NAMES_KR = {
     "registration_time": "등록 일시", "count": "생산 순번", "working": "가동 여부",
     "emergency_stop": "비상 정지", "facility_operation_cycleTime": "설비 운영 사이클타임",
@@ -150,11 +150,8 @@ class DefectPredictionModel:
     
     def _initialize_shap(self) -> None:
         """SHAP explainer 초기화"""
-        if not HAS_SHAP:
-            self.explainer = None
-            return
         try:
-            self.explainer = shap.TreeExplainer(self.model)  # type: ignore[attr-defined]
+            self.explainer = shap.TreeExplainer(self.model)
             self.numeric_index_map = {feat: idx for idx, feat in enumerate(self.model_numeric_cols)}
             
             start_idx = len(self.model_numeric_cols)
@@ -279,10 +276,7 @@ class Predictor:
                 model_manager.onehot_encoder):
                 X_cat = X[model_manager.model_categorical_cols].fillna('UNKNOWN')
                 X_cat_ord = model_manager.ordinal_encoder.transform(X_cat).astype(int)
-                X_cat_ohe = model_manager.onehot_encoder.transform(X_cat_ord)
-                if hasattr(X_cat_ohe, "toarray"):
-                    X_cat_ohe = X_cat_ohe.toarray()
-                arrays.append(X_cat_ohe)
+                arrays.append(model_manager.onehot_encoder.transform(X_cat_ord))
             
             if not arrays:
                 return np.zeros(len(df), dtype=int)
@@ -459,11 +453,11 @@ class SHAPAnalyzer:
     @staticmethod
     def compute_contributions(feature_matrix: np.ndarray) -> Tuple[Optional[Dict], Optional[np.ndarray]]:
         """SHAP 기여도 계산"""
-        if (not HAS_SHAP) or (not model_manager.loaded) or (model_manager.explainer is None) or (feature_matrix is None):
+        if not model_manager.loaded or model_manager.explainer is None or feature_matrix is None:
             return None, None
         
         try:
-            shap_values = model_manager.explainer.shap_values(feature_matrix)  # type: ignore[union-attr]
+            shap_values = model_manager.explainer.shap_values(feature_matrix)
             if isinstance(shap_values, list):
                 shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
             
@@ -487,11 +481,11 @@ class SHAPAnalyzer:
     @staticmethod
     def build_explanation(contributions: Dict, shap_vector: np.ndarray, input_row: Dict) -> Optional[Any]:
         """SHAP explanation 객체 생성"""
-        if (not HAS_SHAP) or (contributions is None) or (shap_vector is None):
+        if contributions is None or shap_vector is None:
             return None
-
+        
         try:
-            from shap import Explanation  # type: ignore
+            from shap import Explanation
             
             expected_value = (float(model_manager.explainer.expected_value[1]) 
                             if isinstance(model_manager.explainer.expected_value, (list, np.ndarray)) 
@@ -1038,11 +1032,8 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
         result = analysis_result.get()
         fig, ax = plt.subplots(figsize=(8, 6))
         
-        if (not HAS_SHAP) or (result is None):
+        if result is None:
             ax.axis("off")
-            if not HAS_SHAP:
-                ax.text(0.5, 0.5, "SHAP 미설치 또는 비활성화", ha="center", va="center",
-                        fontsize=12, color="#6c757d")
             plt.tight_layout()
             return fig
         
@@ -1057,7 +1048,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
         try:
             plt.close('all')
             setup_korean_font()
-            shap.plots.waterfall(explanation, max_display=20, show=False)  # type: ignore[attr-defined]
+            shap.plots.waterfall(explanation, max_display=20, show=False)
             fig = plt.gcf()
             fig.set_size_inches(8, 6)
             fig.tight_layout()
