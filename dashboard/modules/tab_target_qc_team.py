@@ -15,7 +15,7 @@ try:
 except ImportError:
     shap = None
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_PATH = BASE_DIR / "data" / "raw" / "train.csv"
 MODEL_ARTIFACT_PATH = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
 PI_TABLE_PATH = BASE_DIR / "reports" / "permutation_importance_valid.csv"

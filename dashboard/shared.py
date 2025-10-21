@@ -6,8 +6,8 @@ import time
 
 class RealTimeStreamer:
     def __init__(self):
-        # ✅ 상대 경로 사용
-        BASE_DIR = Path(__file__).resolve().parents[1]
+        # ✅ 대시보드 기준 상대 경로 (컨테이너에서도 유효)
+        BASE_DIR = Path(__file__).resolve().parent
         csv_path = BASE_DIR / "data" / "raw" / "test.csv"
 
         if not csv_path.exists():

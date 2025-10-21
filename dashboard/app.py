@@ -609,4 +609,4 @@ def server(input, output, session):
     
     session.on_ended(streamer.cleanup)
 
-app = App(app_ui, server, static_assets=str(Path(__file__).parent / "data" / "png"))
+app = App(app_ui, server)

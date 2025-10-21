@@ -3,7 +3,12 @@ import pandas as pd
 import numpy as np
 import joblib
 from pathlib import Path
-import shap
+try:
+    import shap  # type: ignore
+    HAS_SHAP = True
+except Exception:
+    shap = None  # type: ignore
+    HAS_SHAP = False
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -36,7 +41,6 @@ class Config:
     
     def __post_init__(self):
         self.DROP_COLUMNS = ['line', 'name', 'mold_name', 'date', 'time', 'Unnamed: 0', 'id']
-
 config = Config()
 
 # ========== 공정 프로세스 매핑 ==========
