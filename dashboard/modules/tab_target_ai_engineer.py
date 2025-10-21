@@ -8,7 +8,7 @@ import pandas as pd
 from shiny import reactive, render, ui
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parents[1]
 PREDICTIONS_FILE = BASE_DIR / "data" / "intermin" / "test_predictions_v2.csv"
 SEGMENT_COUNT = 15
 X_AXIS_MARGIN = 1 / 3
