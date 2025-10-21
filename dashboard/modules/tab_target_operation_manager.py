@@ -6,6 +6,7 @@ import matplotlib.font_manager as fm
 import matplotlib
 import math
 from pathlib import Path
+import joblib
 matplotlib.use('Agg')
 
 # 한글 폰트 설정
@@ -61,7 +62,23 @@ ALERT_STATUS_TEXT = {
     "no_data": "데이터 없음",
 }
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+LEVEL_CIRCLE_CLASS = {
+    "normal": "status-green",
+    "warning": "status-warning",
+    "drift": "status-drift",
+    "critical": "status-critical",
+    "no_data": "status-muted",
+}
+
+LEVEL_STATUS_CLASS = {
+    "normal": "level-normal",
+    "warning": "level-warning",
+    "drift": "level-drift",
+    "critical": "level-critical",
+    "no_data": "level-no_data",
+}
+
+BASE_DIR = Path(__file__).resolve().parents[2]
 BASELINE_FILE = BASE_DIR / "data" / "processed" / "train_v1_time.csv"
 
 MAD_THRESHOLD = 2.5
@@ -70,6 +87,7 @@ EWMA_REQUIRED_RUNS = 2
 EWMA_SIGMA = math.sqrt(EWMA_LAMBDA / (2 - EWMA_LAMBDA)) if 0 < EWMA_LAMBDA < 1 else 1.0
 EWMA_LIMIT = 2 * EWMA_SIGMA
 EWMA_TRACKER = {}
+ANOMALY_MAX_ROWS = 500
 
 
 def load_baseline_stats(path: Path, variables):
@@ -170,6 +188,8 @@ transition:background 0.3s;border:none;display:block;cursor:pointer}
 .toggle-circle{position:absolute;width:16px;height:16px;background:white;border-radius:50%;top:4px;left:4px;
 transition:left 0.3s;box-shadow:0 2px 4px rgba(0,0,0,0.2)}
 .toggle-switch.active .toggle-circle{left:20px}
+.fade-in{animation:fadeInEase .35s ease both}
+@keyframes fadeInEase{0%{opacity:0;transform:translateY(6px)}100%{opacity:1;transform:translateY(0)}}
 """
 
 # 헬퍼 함수
@@ -177,23 +197,65 @@ def create_kpi(title, output_id, subtitle, line_class):
     return ui.div(ui.p(title, class_="kpi-title"), ui.div(class_=f"kpi-line {line_class}"),
                   ui.output_ui(output_id), ui.p(subtitle, class_="kpi-sub"), class_="kpi-card")
 
-def create_light(light_id, label):
-    return ui.div(ui.div(id=light_id, class_="status-indicator-circle"),
-                  ui.div(label, class_="status-indicator-label"), class_="status-row")
-
-def create_overlay_light(light_id, label, status_id):
+def create_light(output_id, label):
     return ui.div(
-        ui.div(id=light_id, class_="status-indicator-circle status-muted"),
+        ui.output_ui(output_id),
+        ui.div(label, class_="status-indicator-label"),
+        class_="status-row"
+    )
+
+def get_label(variable):
+    return VARIABLES.get(variable, variable).split(' (')[0]
+
+
+def run_charts_container_ui():
+    """Build a static container that toggles chart visibility without re-rendering the DOM."""
+    no_selection_panel = ui.panel_conditional(
+        "!(input.variable_select && input.variable_select.length)",
+        ui.div(
+            ui.p(
+                "변수를 선택하세요",
+                style="text-align:center;padding:40px;color:#999;font-size:16px",
+            )
+        ),
+    )
+
+    chart_panels = [
+        ui.panel_conditional(
+            f"input.variable_select && input.variable_select.includes('{variable}')",
+            ui.div(
+                ui.output_plot(f"chart_{variable}", height="450px"),
+                class_="chart-container",
+            ),
+        )
+        for variable in VARIABLES.keys()
+    ]
+
+    return ui.div(no_selection_panel, *chart_panels)
+
+
+def overlay_light_row_ui(key: str, label: str):
+    """Create a single overlay row with placeholders for circle and status outputs."""
+    return ui.div(
+        ui.output_ui(f"overlay_light_circle_{key}"),
         ui.div(
             ui.span(label, class_="overlay-light-name"),
-            ui.span("데이터 없음", id=status_id, class_="overlay-light-status level-no_data"),
+            ui.output_ui(f"overlay_light_status_{key}"),
             class_="overlay-light-text",
         ),
         class_="overlay-light-row",
     )
 
-def get_label(variable):
-    return VARIABLES.get(variable, variable).split(' (')[0]
+
+def overlay_light_grid_static_ui():
+    """Build the static overlay layout so only the inner outputs update over time."""
+    rows = [overlay_light_row_ui("defect", "불량 발생")]
+    rows.extend(
+        overlay_light_row_ui(var_name, var_label)
+        for var_name, var_label in ALERT_VARIABLES
+    )
+    return ui.div(*rows, class_="overlay-light-grid")
+
 
 # UI
 tab_ui = ui.page_fluid(
@@ -207,7 +269,7 @@ tab_ui = ui.page_fluid(
                 col_widths=[4,4,4]), style="flex:3"),
             ui.div(
                 ui.div(
-                    create_light("defect_indicator", "불량 발생"),
+                    create_light("defect_indicator_ui", "불량 발생"),
                     ui.input_action_button("toggle_defect_overlay", "⚠ 경보 창 띄우기", class_="btn btn-outline-danger btn-sm"),
                     class_="status-panel"
                 ),
@@ -223,7 +285,7 @@ tab_ui = ui.page_fluid(
                ui.tags.div(ui.input_checkbox_group("variable_select", None, choices=VARIABLES, selected=DEFAULT_VARIABLES, inline=False), style="display:none"),
                class_="custom-card"),
         ui.div(ui.div("런 차트", class_="card-header-title"),
-               ui.output_ui("run_charts_container"),
+               run_charts_container_ui(),
                class_="custom-card"),
         ui.div(ui.div("Top 10 로그 (실시간 데이터)", class_="card-header-title"),
                ui.div(ui.output_data_frame("tab1_table_realtime"), class_="table-container"),
@@ -231,14 +293,7 @@ tab_ui = ui.page_fluid(
         class_="main-container"),
     ui.div(
         ui.div("불량 경보", ui.tags.button("×", id="close_defect_overlay", class_="overlay-close-btn", **{"aria-label": "닫기"}), class_="overlay-header"),
-        ui.div(
-            create_overlay_light("overlay_light_defect", "불량 발생", "overlay_status_defect"),
-            create_overlay_light("overlay_light_cast_pressure", "주조 압력", "overlay_status_cast_pressure"),
-            create_overlay_light("overlay_light_upper_mold_temp1", "상부 금형 온도1", "overlay_status_upper_mold_temp1"),
-            create_overlay_light("overlay_light_low_section_speed", "저속 구간 속도", "overlay_status_low_section_speed"),
-            create_overlay_light("overlay_light_biscuit_thickness", "비스킷 두께", "overlay_status_biscuit_thickness"),
-            class_="overlay-light-grid"
-        ),
+        overlay_light_grid_static_ui(),
         id="defect-overlay",
         class_="defect-overlay"
     ),
@@ -346,102 +401,6 @@ tab_ui = ui.page_fluid(
       });
     });
     """),
-    ui.tags.script("""
-    // 불량 센서 상태 업데이트 핸들러
-    Shiny.addCustomMessageHandler('update_sensors', function(data) {
-        var defectEl = document.getElementById('defect_indicator');
-
-        var levelCircleClass = {
-            "normal": "status-green",
-            "warning": "status-warning",
-            "drift": "status-drift",
-            "critical": "status-critical",
-            "no_data": "status-muted"
-        };
-        var levelStatusClass = {
-            "normal": "level-normal",
-            "warning": "level-warning",
-            "drift": "level-drift",
-            "critical": "level-critical",
-            "no_data": "level-no_data"
-        };
-        var levelKeysCircle = ["status-green","status-warning","status-drift","status-critical","status-muted"];
-        var levelKeysStatus = ["level-normal","level-warning","level-drift","level-critical","level-no_data"];
-
-        if (defectEl) {
-            levelKeysCircle.forEach(function(cls){ defectEl.classList.remove(cls); });
-            defectEl.classList.add(data.is_defect ? "status-critical" : "status-green");
-        }
-
-        function updateOverlayLight(circleId, statusId, level, text, tooltip) {
-            var circleEl = document.getElementById(circleId);
-            if (circleEl) {
-                levelKeysCircle.forEach(function(cls){ circleEl.classList.remove(cls); });
-                circleEl.classList.add(levelCircleClass[level] || "status-muted");
-                if (tooltip) {
-                    circleEl.title = tooltip;
-                } else {
-                    circleEl.removeAttribute('title');
-                }
-            }
-            var statusEl = document.getElementById(statusId);
-            if (statusEl) {
-                levelKeysStatus.forEach(function(cls){ statusEl.classList.remove(cls); });
-                statusEl.classList.add(levelStatusClass[level] || "level-no_data");
-                statusEl.textContent = text || "데이터 없음";
-            }
-        }
-
-        var defectLevel = data.is_defect ? "critical" : "normal";
-        updateOverlayLight(
-            "overlay_light_defect",
-            "overlay_status_defect",
-            defectLevel,
-            defectLevel === "critical" ? "CRITICAL (불량 예측)" : "정상",
-            defectLevel === "critical" ? "불량으로 예측됨" : "정상 동작 중"
-        );
-
-        var alertsByKey = {};
-        if (data.alerts && data.alerts.length) {
-            data.alerts.forEach(function(item){
-                if (item.key) {
-                    alertsByKey[item.key] = item;
-                }
-            });
-        }
-
-        var overlayConfig = {
-            "cast_pressure": {circle: "overlay_light_cast_pressure", status: "overlay_status_cast_pressure"},
-            "upper_mold_temp1": {circle: "overlay_light_upper_mold_temp1", status: "overlay_status_upper_mold_temp1"},
-            "low_section_speed": {circle: "overlay_light_low_section_speed", status: "overlay_status_low_section_speed"},
-            "biscuit_thickness": {circle: "overlay_light_biscuit_thickness", status: "overlay_status_biscuit_thickness"}
-        };
-
-        Object.keys(overlayConfig).forEach(function(key){
-            var cfg = overlayConfig[key];
-            var item = alertsByKey[key];
-            if (item) {
-                var tooltipParts = [];
-                if (typeof item.value === "number") {
-                    tooltipParts.push("최근값: " + item.value.toFixed(2));
-                }
-                if (item.flags && item.flags.length) {
-                    tooltipParts.push(item.flags.join(", "));
-                }
-                var tooltipText = tooltipParts.join("\n");
-                updateOverlayLight(
-                    cfg.circle,
-                    cfg.status,
-                    item.level || "no_data",
-                    item.display || item.level || "",
-                    tooltipText
-                );
-            } else {
-                updateOverlayLight(cfg.circle, cfg.status, "no_data", "데이터 없음", "");
-            }
-        });
-    });
-    """),
 )
 
 ## SERVER
@@ -470,6 +429,14 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         if df is None or df.empty:
             return summary
 
+        if 0 < ANOMALY_MAX_ROWS < len(df):
+            df = df.tail(ANOMALY_MAX_ROWS).copy()
+
+        available_keys = [var_name for var_name, _ in ALERT_VARIABLES if var_name in df.columns]
+        numeric_df = pd.DataFrame()
+        if available_keys:
+            numeric_df = df[available_keys].apply(pd.to_numeric, errors="coerce")
+
         for var_name, var_label in ALERT_VARIABLES:
             stats = BASELINE_STATS.get(var_name)
             default_entry = {
@@ -486,10 +453,10 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
                 "std": None,
             }
             summary[var_name] = default_entry
-            if stats is None or var_name not in df.columns:
+            if stats is None or var_name not in numeric_df.columns:
                 continue
 
-            series = pd.to_numeric(df[var_name], errors="coerce").dropna()
+            series = numeric_df[var_name].dropna()
             if series.empty:
                 continue
 
@@ -541,40 +508,135 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
             }
         return summary
 
-    @reactive.effect
-    def _sensor_update():
-        reactive.invalidate_later(500)
-        is_defect = defect_indicator() if defect_indicator else False
+    @reactive.calc
+    def defect_state():
+        state = {
+            "level": "no_data",
+            "text": ALERT_STATUS_TEXT.get("no_data", "데이터 없음"),
+            "tooltip": None,
+        }
+        df = shared_df.get()
+        if df is None or df.empty:
+            return state
 
-        alerts_payload = []
-        statuses = anomaly_summary()
-        for var_name, var_label in ALERT_VARIABLES:
-            info = statuses.get(var_name, {})
-            level = info.get("level", "no_data")
-            display_text = info.get("display") or ALERT_STATUS_TEXT.get(level, "데이터 없음")
-            flags = []
-            if info.get("mad_breach"):
-                flags.append("MAD 경보")
-            if info.get("drift"):
-                flags.append("EWMA 경보")
+        is_defect = False
+        level = "normal"
+        text = "정상"
+        tooltip = "정상 동작 중"
 
-            alerts_payload.append({
-                "name": var_label,
-                "key": var_name,
-                "value": info.get("latest"),
-                "level": level,
-                "display": display_text,
-                "mean": info.get("mean"),
-                "std": info.get("std"),
-                "flags": flags,
-                "details": ", ".join(flags),
-            })
+        if defect_indicator:
+            raw = defect_indicator()
+            if isinstance(raw, dict):
+                is_defect = bool(raw.get("is_defect", False))
+                level = raw.get("level") or ("critical" if is_defect else "normal")
+                text = raw.get("text") or ("CRITICAL (불량 예측)" if is_defect else "정상")
+                tooltip = raw.get("tooltip") or ("불량으로 예측됨" if is_defect else "정상 동작 중")
+            else:
+                is_defect = bool(raw)
+                level = "critical" if is_defect else "normal"
+                text = "CRITICAL (불량 예측)" if is_defect else "정상"
+                tooltip = "불량으로 예측됨" if is_defect else "정상 동작 중"
+        else:
+            # defect_indicator가 없으면 기본 정상
+            is_defect = False
+            level = "normal"
+            text = "정상"
+            tooltip = "정상 동작 중"
 
-        # Shiny 메시지로 JavaScript에 전달
-        session.send_custom_message("update_sensors", {
-            "is_defect": is_defect,
-            "alerts": alerts_payload,
+        if level not in LEVEL_CIRCLE_CLASS:
+            level = "critical" if is_defect else "normal"
+
+        if not text:
+            text = "CRITICAL (불량 예측)" if level == "critical" else ALERT_STATUS_TEXT.get(level, "정상")
+        if not tooltip:
+            tooltip = "불량으로 예측됨" if level == "critical" else "정상 동작 중"
+
+        state.update({
+            "level": level,
+            "text": text,
+            "tooltip": tooltip,
         })
+        return state
+
+    @output
+    @render.ui
+    def defect_indicator_ui():
+        state = defect_state()
+        level = state.get("level", "no_data")
+        circle_class = LEVEL_CIRCLE_CLASS.get(level, "status-muted")
+        tooltip = state.get("tooltip")
+        div_kwargs = {
+            "id": "defect_indicator",
+            "class_": f"status-indicator-circle {circle_class}"
+        }
+        if tooltip:
+            div_kwargs["title"] = tooltip
+        return ui.div(**div_kwargs)
+
+    @output
+    @render.ui
+    def overlay_light_circle_defect():
+        state = defect_state()
+        level = state.get("level", "no_data")
+        circle_class = LEVEL_CIRCLE_CLASS.get(level, "status-muted")
+        tooltip = state.get("tooltip")
+        attrs = {"class_": f"status-indicator-circle {circle_class}"}
+        if tooltip:
+            attrs["title"] = tooltip
+        return ui.div(**attrs)
+
+    @output
+    @render.ui
+    def overlay_light_status_defect():
+        state = defect_state()
+        level = state.get("level", "no_data")
+        text = state.get("text") or ALERT_STATUS_TEXT.get(level, "데이터 없음")
+        status_class = LEVEL_STATUS_CLASS.get(level, "level-no_data")
+        return ui.span(text, class_=f"overlay-light-status {status_class}")
+
+    def build_anomaly_tooltip(info: dict | None):
+        if not info:
+            return None
+        tooltip_parts = []
+        latest = info.get("latest")
+        if isinstance(latest, (int, float)) and np.isfinite(latest):
+            tooltip_parts.append(f"최근값: {latest:.2f}")
+        flags = []
+        if info.get("mad_breach"):
+            flags.append("MAD 경보")
+        if info.get("drift"):
+            flags.append("EWMA 경보")
+        if flags:
+            tooltip_parts.append(", ".join(flags))
+        return "\n".join(part for part in tooltip_parts if part) or None
+
+    def register_overlay_alert_outputs(var_name: str, var_label: str):
+        circle_id = f"overlay_light_circle_{var_name}"
+        status_id = f"overlay_light_status_{var_name}"
+
+        @output(id=circle_id)
+        @render.ui
+        def _circle(var_key=var_name):
+            info = anomaly_summary().get(var_key, {})
+            level = info.get("level", "no_data")
+            circle_class = LEVEL_CIRCLE_CLASS.get(level, "status-muted")
+            tooltip = build_anomaly_tooltip(info)
+            attrs = {"class_": f"status-indicator-circle {circle_class}"}
+            if tooltip:
+                attrs["title"] = tooltip
+            return ui.div(**attrs)
+
+        @output(id=status_id)
+        @render.ui
+        def _status(var_key=var_name):
+            info = anomaly_summary().get(var_key, {})
+            level = info.get("level", "no_data")
+            text = info.get("display") or ALERT_STATUS_TEXT.get(level, "데이터 없음")
+            status_class = LEVEL_STATUS_CLASS.get(level, "level-no_data")
+            return ui.span(text, class_=f"overlay-light-status {status_class}")
+
+    for var_name, var_label in ALERT_VARIABLES:
+        register_overlay_alert_outputs(var_name, var_label)
 
     @output
     @render.ui
@@ -593,7 +655,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         working = (df['working'] == '가동').sum()
         return ui.h1(f"{(working/len(df)*100):.1f}%", class_="kpi-value")
 
-    def create_single_chart(df, mold_code, variable):
+    def create_single_chart(df, mold_code, variable, statuses=None, defect_info=None):
         """단일 차트를 생성하는 헬퍼 함수"""
         fig, ax = plt.subplots(figsize=(12, 4.5))
         ax.set_facecolor('#f8f9fa')
@@ -660,6 +722,26 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
             
             mean = y.mean()
             ax.axhline(y=mean, color='#e74c3c', linestyle='--', linewidth=2, alpha=0.7, label=f'평균: {mean:.2f}')
+
+            highlight_idx = []
+            status_info = (statuses or {}).get(variable) if statuses else None
+            if status_info and status_info.get("level") in {"warning", "drift", "critical"} and len(y) > 0:
+                highlight_idx.append(len(y) - 1)
+            if defect_info and defect_info.get("level") in {"critical"} and len(y) > 0:
+                highlight_idx.append(len(y) - 1)
+            if highlight_idx:
+                highlight_idx = sorted(set(highlight_idx))
+                x_highlight = [list(x_time)[i] for i in highlight_idx]
+                y_highlight = y[highlight_idx]
+                ax.scatter(
+                    x_highlight,
+                    y_highlight,
+                    color='#C00000',
+                    edgecolor='white',
+                    s=100,
+                    zorder=5,
+                    label='알림 발생 지점'
+                )
             
             if use_time_axis:
                 import matplotlib.dates as mdates
@@ -676,53 +758,34 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         except Exception as e:
             return empty('오류 발생', str(e)[:50], color='#e74c3c')
 
-    @output
-    @render.ui
-    def run_charts_container():
-        df = shared_df.get()
-        mold_code = input.mold_code_select()
-        variables = input.variable_select()
-        
-        if not variables:
-            return ui.div(
-                ui.p("변수를 선택하세요", style="text-align:center;padding:40px;color:#999;font-size:16px")
+    def register_chart_output(variable_key: str):
+        chart_id = f"chart_{variable_key}"
+
+        @output(id=chart_id)
+        @render.plot
+        def _():
+            selected_variables = input.variable_select() or []
+            if variable_key not in selected_variables:
+                fig, ax = plt.subplots(figsize=(12, 4.5))
+                ax.axis("off")
+                plt.tight_layout()
+                return fig
+
+            df_local = shared_df.get()
+            statuses = anomaly_summary()
+            defect_info = defect_state()
+            return create_single_chart(
+                df_local,
+                input.mold_code_select(),
+                variable_key,
+                statuses=statuses,
+                defect_info=defect_info,
             )
-        
-        # 각 변수에 대해 차트 생성
-        chart_outputs = []
-        for var in variables:
-            chart_id = f"chart_{var}"
-            chart_outputs.append(
-                ui.div(
-                    ui.output_plot(chart_id, height="450px"),
-                    class_="chart-container"
-                )
-            )
-        
-        return ui.div(*chart_outputs)
-    
-    # 동적으로 각 변수의 차트 렌더링
-    @reactive.effect
-    def _create_chart_renderers():
-        variables = input.variable_select()
-        if not variables:
-            return
-        
-        df = shared_df.get()
-        mold_code = input.mold_code_select()
-        
-        for var in variables:
-            chart_id = f"chart_{var}"
-            
-            # 클로저 문제 해결을 위한 함수 팩토리
-            def make_renderer(variable):
-                @output(id=chart_id)
-                @render.plot
-                def _():
-                    return create_single_chart(shared_df.get(), input.mold_code_select(), variable)
-                return _
-            
-            make_renderer(var)
+
+        return _
+
+    for variable_key in VARIABLES.keys():
+        register_chart_output(variable_key)
 
     @output
     @render.data_frame
