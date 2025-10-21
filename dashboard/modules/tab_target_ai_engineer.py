@@ -1,720 +1,312 @@
-# dashboard/modules/tab_target_ai_engineer.py
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
-from typing import Tuple
 
-import joblib
 import matplotlib.pyplot as plt
-from matplotlib import font_manager
 import numpy as np
 import pandas as pd
-from shiny import ui, render
-from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-)
+from shiny import reactive, render, ui
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 
-# ---------------------------
-# 파일 경로 및 상수
-# ---------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
-LIGHTGBM_MODEL = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
-TEST_FEATURE_FILE = BASE_DIR / "data" / "raw" / "test.csv"
-TEST_LABEL_FILE = BASE_DIR / "data" / "raw" / "test_label.csv"
-ISOLATION_MODEL_FILE = BASE_DIR / "data" / "intermin" / "isolation_forest_by_mold_code.pkl"
-TARGET_COLUMN = "passorfail"
-DROP_COLUMNS = ["date", "time", "Unnamed: 0"]
-ISO_DROP_COLUMNS = [
-    "id",
-    "line",
-    "name",
-    "mold_name",
-    "time",
-    "date",
-    "working",
-    "emergency_stop",
-    "registration_time",
-    "tryshot_signal",
-    "mold_code",
-    "heating_furnace",
-    TARGET_COLUMN,
-]
-CLASS_LABELS = ["정상", "불량"]
-DEFAULT_FONT = "Malgun Gothic"
+PREDICTIONS_FILE = BASE_DIR / "data" / "intermin" / "test_predictions_v2.csv"
+SEGMENT_COUNT = 15
+X_AXIS_MARGIN = 1 / 3
+MOLD_CODES = ["8412", "8917", "8722", "8413", "8576"]
 
 
-def _configure_fonts() -> None:
-    # ensure Korean characters render; fallback silently if font missing
-    try:
-        font_manager.findfont(DEFAULT_FONT, fallback_to_default=False)
-        plt.rcParams["font.family"] = DEFAULT_FONT
-    except (ValueError, RuntimeError):
-        pass
-    plt.rcParams["axes.unicode_minus"] = False
-
-
-_configure_fonts()
-
-
-@lru_cache(maxsize=1)
-def _load_artifact() -> dict:
-    if not LIGHTGBM_MODEL.exists():
-        raise FileNotFoundError(f"모델 파일을 찾을 수 없습니다: {LIGHTGBM_MODEL}")
-    return joblib.load(LIGHTGBM_MODEL)
-
-
-@lru_cache(maxsize=1)
-def _model_components():
-    artifact = _load_artifact()
-    model = artifact["model"]
-    scaler = artifact.get("scaler")
-    ordinal_encoder = artifact.get("ordinal_encoder")
-    onehot_encoder = artifact.get("onehot_encoder")
-    threshold = float(artifact.get("operating_threshold", 0.5))
-    return model, scaler, ordinal_encoder, onehot_encoder, threshold
-
-
-@lru_cache(maxsize=1)
-def _numeric_columns() -> Tuple[str, ...]:
-    _, scaler, _, _, _ = _model_components()
-    if scaler is None or not hasattr(scaler, "feature_names_in_"):
-        return tuple()
-    return tuple(scaler.feature_names_in_)
-
-
-@lru_cache(maxsize=1)
-def _categorical_columns() -> Tuple[str, ...]:
-    _, _, ordinal_encoder, _, _ = _model_components()
-    if ordinal_encoder is None or not hasattr(ordinal_encoder, "feature_names_in_"):
-        return tuple()
-    return tuple(ordinal_encoder.feature_names_in_)
-
-
-@lru_cache(maxsize=1)
-def _load_test_dataframe() -> pd.DataFrame:
-    if not TEST_FEATURE_FILE.exists():
-        raise FileNotFoundError(f"테스트 데이터 파일이 없습니다: {TEST_FEATURE_FILE}")
-    if not TEST_LABEL_FILE.exists():
-        raise FileNotFoundError(f"테스트 라벨 파일이 없습니다: {TEST_LABEL_FILE}")
-
-    features = pd.read_csv(TEST_FEATURE_FILE)
-    labels = pd.read_csv(TEST_LABEL_FILE)
-
-    if "id" not in features.columns or "id" not in labels.columns:
-        raise KeyError("테스트 데이터와 라벨에 공통 'id' 컬럼이 필요합니다.")
-
-    df = features.merge(labels, on="id", how="left", validate="one_to_one")
-    if TARGET_COLUMN not in df.columns:
-        raise KeyError(f"라벨 파일에 '{TARGET_COLUMN}' 컬럼이 존재하지 않습니다.")
-
-    df = df.copy()
+def _load_predictions() -> pd.DataFrame:
+    df = pd.read_csv(PREDICTIONS_FILE).reset_index(drop=True)
+    if {"date", "time"}.issubset(df.columns):
+        combined_dt = df["date"].astype(str).str.strip() + " " + df["time"].astype(str).str.strip()
+        combined_td = df["time"].astype(str).str.strip() + " " + df["date"].astype(str).str.strip()
+        ts = pd.to_datetime(combined_dt, errors="coerce", format="%Y-%m-%d %H:%M:%S")
+        if ts.isna().all():
+            ts = pd.to_datetime(combined_td, errors="coerce", format="%H:%M:%S %Y-%m-%d")
+        fallback = pd.to_datetime(combined_dt, errors="coerce")
+        ts = ts.where(~ts.isna(), fallback)
+        ts = ts.where(~ts.isna(), pd.to_datetime(combined_td, errors="coerce"))
+        df["timestamp"] = ts
+    else:
+        df["timestamp"] = pd.NaT
     return df
 
 
-@lru_cache(maxsize=1)
-def _test_datetime_series() -> pd.Series:
-    df = _load_test_dataframe()
-    if "date" in df.columns and "time" in df.columns:
-        timestamp = pd.to_datetime(
-            df["date"].astype(str) + " " + df["time"].astype(str),
-            errors="coerce",
-        )
-    elif "registration_time" in df.columns:
-        timestamp = pd.to_datetime(df["registration_time"], errors="coerce")
-    else:
-        raise KeyError("기간 설정을 위한 'date'/'time' 또는 'registration_time' 컬럼이 필요합니다.")
-    timestamp.name = "timestamp"
-    return timestamp
-
-
-@lru_cache(maxsize=1)
-def _load_test_frame() -> Tuple[pd.DataFrame, pd.Series]:
-    df = _load_test_dataframe()
-    df_model = df.drop(columns=DROP_COLUMNS, errors="ignore")
-
-    y = df_model[TARGET_COLUMN].astype("Int64").fillna(0).astype(int)
-    X = df_model.drop(columns=[TARGET_COLUMN])
-    return X, y
-
-
-def _booster_iteration(model) -> int | None:
-    iteration = getattr(model, "best_iteration", None)
-    if not iteration:
-        current_iteration = getattr(model, "current_iteration", None)
-        if callable(current_iteration):
-            iteration = current_iteration()
-    return int(iteration) if iteration else None
-
-
-def _transform_features(X: pd.DataFrame) -> np.ndarray:
-    _, scaler, ordinal_encoder, onehot_encoder, _ = _model_components()
-    num_cols = list(_numeric_columns())
-    cat_cols = list(_categorical_columns())
-    row_count = len(X)
-
-    if num_cols:
-        missing_num = [col for col in num_cols if col not in X.columns]
-        if missing_num:
-            raise KeyError(f"입력 데이터에 수치형 컬럼 {missing_num} 이(가) 없습니다.")
-        X_num = scaler.transform(X.loc[:, num_cols]) if scaler is not None else np.empty((row_count, 0))
-    else:
-        X_num = np.empty((row_count, 0))
-
-    if cat_cols:
-        if ordinal_encoder is None or onehot_encoder is None:
-            raise RuntimeError("범주형 인코더가 누락되어 PDP를 계산할 수 없습니다.")
-        missing_cat = [col for col in cat_cols if col not in X.columns]
-        if missing_cat:
-            raise KeyError(f"입력 데이터에 범주형 컬럼 {missing_cat} 이(가) 없습니다.")
-        X_cat_ord = ordinal_encoder.transform(X.loc[:, cat_cols]).astype(int)
-        X_cat_ohe = onehot_encoder.transform(X_cat_ord)
-    else:
-        X_cat_ohe = np.empty((row_count, 0))
-
-    if X_num.size and X_cat_ohe.size:
-        return np.hstack([X_num, X_cat_ohe])
-    if X_num.size:
-        return X_num
-    if X_cat_ohe.size:
-        return X_cat_ohe
-    return np.zeros((row_count, 0))
-
-
-def _predict_proba(X: pd.DataFrame) -> np.ndarray:
-    model, _, _, _, _ = _model_components()
-    matrix = _transform_features(X)
-    iteration = _booster_iteration(model)
-    if iteration:
-        return model.predict(matrix, num_iteration=iteration)
-    return model.predict(matrix)
-
-
-@lru_cache(maxsize=1)
-def _model_predictions() -> Tuple[np.ndarray, np.ndarray]:
-    _, _, _, _, threshold = _model_components()
-    X, y = _load_test_frame()
-
-    probs = _predict_proba(X)
-    preds = (probs >= threshold).astype(int)
-
-    if "tryshot_signal" in X.columns:
-        preds = preds.copy()
-        preds[X["tryshot_signal"].to_numpy() == "D"] = 1
-
-    return y.to_numpy(), preds
-
-
-@lru_cache(maxsize=1)
-def _model_evaluation() -> Tuple[np.ndarray, pd.DataFrame]:
-    y_true, y_pred = _model_predictions()
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    metrics = pd.DataFrame(
-        [
-            {"지표": "정확도", "값": accuracy_score(y_true, y_pred)},
-            {"지표": "정밀도", "값": precision_score(y_true, y_pred, zero_division=0)},
-            {"지표": "재현율", "값": recall_score(y_true, y_pred, zero_division=0)},
-            {"지표": "F1-score", "값": f1_score(y_true, y_pred, zero_division=0)},
-        ]
-    )
-    metrics["값"] = metrics["값"].map(lambda x: f"{x:.3f}")
-    return cm, metrics
-
-
-@lru_cache(maxsize=1)
-def _load_isolation_artifact() -> dict:
-    if not ISOLATION_MODEL_FILE.exists():
-        raise FileNotFoundError(f"Isolation Forest 모델 파일을 찾을 수 없습니다: {ISOLATION_MODEL_FILE}")
-    try:
-        return joblib.load(ISOLATION_MODEL_FILE)
-    except Exception:
-        import pickle
-
-        with open(ISOLATION_MODEL_FILE, "rb") as f:
-            return pickle.load(f)
-
-
-@lru_cache(maxsize=1)
-def _isolation_predictions() -> Tuple[np.ndarray, np.ndarray]:
-    artifact = _load_isolation_artifact()
-    models = artifact.get("models", {})
-    imputers = artifact.get("imputers", {})
-    feature_columns = artifact.get("feature_columns", {})
-    thresholds = artifact.get("thresholds", {})
-
-    df = _load_test_dataframe().copy()
-    if "mold_code" in df.columns:
-        df.loc[:, "mold_code"] = (
-            df["mold_code"].astype(str)
-            .fillna("")
-            .map(lambda v: "UNKNOWN" if not str(v).strip() else str(v).strip())
-        )
-    else:
-        df.loc[:, "mold_code"] = "UNKNOWN"
-
-    actual = df[TARGET_COLUMN].astype("Int64").fillna(0).astype(int).to_numpy()
-    predictions = np.zeros(len(df), dtype=int)
-
-    if not models:
-        return actual, predictions
-
-    for mold_code, subset in df.groupby("mold_code", sort=False):
-        model = models.get(mold_code)
-        imputer = imputers.get(mold_code)
-        cols = feature_columns.get(mold_code, [])
-        threshold = thresholds.get(mold_code, 0.0)
-
-        if model is None or imputer is None or not cols:
-            continue
-
-        subset_features = (
-            subset.drop(columns=ISO_DROP_COLUMNS, errors="ignore")
-            .apply(pd.to_numeric, errors="coerce")
-            .reindex(columns=cols)
-        )
-
-        try:
-            transformed = imputer.transform(subset_features)
-            scores = model.decision_function(transformed)
-        except Exception:
-            continue
-
-        subset_preds = (scores < threshold).astype(int)
-        predictions[subset.index.to_numpy()] = subset_preds
-
-    return actual, predictions
-
-
-@lru_cache(maxsize=1)
-def _isolation_evaluation() -> Tuple[np.ndarray, pd.DataFrame]:
-    y_true, y_pred = _isolation_predictions()
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    metrics = pd.DataFrame(
-        [
-            {"지표": "정확도", "값": accuracy_score(y_true, y_pred)},
-            {"지표": "정밀도", "값": precision_score(y_true, y_pred, zero_division=0)},
-            {"지표": "재현율", "값": recall_score(y_true, y_pred, zero_division=0)},
-            {"지표": "F1-score", "값": f1_score(y_true, y_pred, zero_division=0)},
-        ]
-    )
-    metrics["값"] = metrics["값"].map(lambda x: f"{x:.3f}")
-    return cm, metrics
-
-
-# PDP에서는 수치형 컬럼만 사용
-PDP_FEATURES = _numeric_columns()
-
-
-def _date_range_defaults() -> Tuple[str | None, str | None]:
-    try:
-        ts = _test_datetime_series().dropna()
-        if ts.empty:
-            return None, None
-        start = ts.min().date().isoformat()
-        end = ts.max().date().isoformat()
-        return start, end
-    except (FileNotFoundError, KeyError):
-        return None, None
-
-
-DATE_RANGE_START, DATE_RANGE_END = _date_range_defaults()
-
-
-def _compute_pdp(feature: str, grid_size: int = 20) -> Tuple[pd.DataFrame, bool]:
-    X, _ = _load_test_frame()
-    if feature not in X.columns:
-        raise KeyError(f"PDP를 계산할 수 없습니다. '{feature}' 컬럼이 존재하지 않습니다.")
-
-    series = X[feature]
-    if series.dropna().empty:
-        raise ValueError(f"'{feature}' 컬럼에 유효한 값이 없어 PDP를 계산할 수 없습니다.")
-
-    working = X.copy()
-    if pd.api.types.is_numeric_dtype(series):
-        lower, upper = np.nanpercentile(series, [1, 99])
-        if np.isclose(lower, upper):
-            values = np.array([series.dropna().median()])
-        else:
-            values = np.linspace(lower, upper, grid_size)
-        probabilities = []
-        for val in values:
-            working[feature] = val
-            probabilities.append(float(np.mean(_predict_proba(working))))
-        pdp_df = pd.DataFrame({"feature_value": values, "probability": probabilities})
-        return pdp_df, True
-
-    categories = sorted(series.dropna().unique())
-    probabilities = []
-    for cat in categories:
-        working[feature] = cat
-        probabilities.append(float(np.mean(_predict_proba(working))))
-    pdp_df = pd.DataFrame({"feature_value": categories, "probability": probabilities})
-    return pdp_df, False
-
-
-@lru_cache(maxsize=1)
-def _prediction_summary() -> pd.DataFrame:
-    X, y = _load_test_frame()
-    df_full = _load_test_dataframe()
-    timestamps = _test_datetime_series()
-
-    model, _, ordinal_encoder, onehot_encoder, threshold = _model_components()
-    matrix = _transform_features(X)
-    iteration = _booster_iteration(model)
-
-    probs = model.predict(matrix, num_iteration=iteration)
-    preds = (probs >= threshold).astype(int)
-
-    if "tryshot_signal" in X.columns:
-        tryshot = X["tryshot_signal"].to_numpy()
-        mask = pd.Series(tryshot == "D")
-        if mask.any():
-            preds = preds.copy()
-            preds[mask.to_numpy()] = 1
-
-    contrib = model.predict(matrix, num_iteration=iteration, pred_contrib=True)
-    feature_contrib = contrib[:, :-1]  # drop bias term
-
-    per_feature: dict[str, np.ndarray] = {}
-    pointer = 0
-    numeric_cols = list(_numeric_columns())
-    categorical_cols = list(_categorical_columns())
-
-    for col in numeric_cols:
-        per_feature[col] = feature_contrib[:, pointer]
-        pointer += 1
-
-    if categorical_cols:
-        if onehot_encoder is None:
-            raise RuntimeError("원-핫 인코더가 없어 범주형 기여도를 계산할 수 없습니다.")
-        for col, categories in zip(categorical_cols, onehot_encoder.categories_):
-            count = len(categories)
-            if count == 0:
-                per_feature[col] = np.zeros(len(X))
-            else:
-                per_feature[col] = feature_contrib[:, pointer : pointer + count].sum(axis=1)
-            pointer += count
-
-    remaining = feature_contrib.shape[1] - pointer
-    if remaining > 0:
-        per_feature["기타"] = feature_contrib[:, pointer:].sum(axis=1)
-
-    if not per_feature:
-        per_feature_df = pd.DataFrame(index=X.index)
-    else:
-        per_feature_df = pd.DataFrame(per_feature, index=X.index)
-
-    if per_feature_df.empty:
-        top_feature = pd.Series(data=pd.NA, index=X.index, name="top_feature")
-        top_value = pd.Series(data=np.nan, index=X.index, name="top_value")
-    else:
-        top_feature = per_feature_df.idxmax(axis=1)
-        top_value = per_feature_df.max(axis=1)
-
-    ids = df_full["id"].to_numpy() if "id" in df_full.columns else np.arange(len(X))
-    summary = pd.DataFrame(
-        {
-            "id": ids,
-            "timestamp": timestamps.to_numpy(),
-            "probability": probs,
-            "prediction": preds,
-            "actual": y.to_numpy() if isinstance(y, pd.Series) else y,
-            "top_feature": top_feature,
-            "top_value": top_value,
-        }
-    )
-    return summary
-
-
-def _top_feature_counts(start_date: str | None, end_date: str | None) -> pd.DataFrame:
-    summary = _prediction_summary()
-    if "timestamp" not in summary.columns:
-        raise KeyError("타임스탬프 정보가 없어 기간 필터링을 할 수 없습니다.")
-
-    df = summary.copy()
-    ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    mask = ts.notna()
-
-    if start_date:
-        start_dt = pd.to_datetime(start_date)
-        mask &= ts >= start_dt
-    if end_date:
-        end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
-        mask &= ts <= end_dt
-
-    df = df.loc[mask & (df["prediction"] == 1)]
-    df = df[df["top_feature"].notna()]
-
+def _segment_f1(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(
-            [
-                {"변수": "데이터 없음", "건수": 0, "비율": "0.0%"}
-            ]
-        )
+        return pd.DataFrame({"segment": np.arange(1, SEGMENT_COUNT + 1), "timestamp": pd.NaT, "f1": np.nan})
 
-    counts = df["top_feature"].value_counts().rename_axis("변수").reset_index(name="건수")
-    total = counts["건수"].sum()
-    counts["비율"] = (counts["건수"] / total * 100).map(lambda x: f"{x:.1f}%")
-    return counts
+    if "passorfail" not in df.columns or "prediction" not in df.columns:
+        raise KeyError("예측 파일에 'passorfail' 또는 'prediction' 컬럼이 없습니다.")
+
+    timestamps = pd.to_datetime(df["timestamp"], errors="coerce")
+    valid_mask = timestamps.notna()
+    valid_df = df.loc[valid_mask].copy()
+    valid_times = timestamps.loc[valid_mask]
+
+    segments: list[dict[str, object]] = []
+
+    if not valid_df.empty and valid_times.min() != valid_times.max():
+        boundaries = pd.date_range(valid_times.min(), valid_times.max(), periods=SEGMENT_COUNT + 1)
+        for idx in range(SEGMENT_COUNT):
+            left = boundaries[idx]
+            right = boundaries[idx + 1]
+            if idx < SEGMENT_COUNT - 1:
+                mask = (valid_times >= left) & (valid_times < right)
+            else:
+                mask = (valid_times >= left) & (valid_times <= right)
+            subset = valid_df.loc[mask]
+            midpoint = left + (right - left) / 2
+            if subset.empty:
+                segments.append({"segment": idx + 1, "timestamp": midpoint, "f1": np.nan})
+            else:
+                f1 = f1_score(subset["passorfail"].astype(int), subset["prediction"].astype(int), zero_division=0)
+                segments.append({"segment": idx + 1, "timestamp": midpoint, "f1": f1})
+    else:
+        indices = np.array_split(df.index.to_numpy(), SEGMENT_COUNT)
+        for idx, idx_block in enumerate(indices, start=1):
+            if len(idx_block) == 0:
+                segments.append({"segment": idx, "timestamp": pd.NaT, "f1": np.nan})
+                continue
+            slice_df = df.loc[idx_block]
+            f1 = f1_score(slice_df["passorfail"].astype(int), slice_df["prediction"].astype(int), zero_division=0)
+            ts_subset = timestamps.loc[idx_block]
+            midpoint = ts_subset.dropna().iloc[len(ts_subset.dropna()) // 2] if ts_subset.notna().any() else pd.NaT
+            segments.append({"segment": idx, "timestamp": midpoint, "f1": f1})
+
+    return pd.DataFrame(segments)
 
 
-# 탭별 UI ----------------------------------------------------------------------
-tab_ui = ui.page_fluid(
-    ui.layout_column_wrap(
-        ui.card(
-            ui.input_action_button(
-                "btn_stream_start",
-                "스트리밍 시작",
-                class_="w-100 btn-primary",
-            ),
+plot_card = ui.card(
+    ui.card_header("금형 코드별 F1-Score 추이"),
+    ui.output_plot("plot_segment_f1", height="420px"),
+    ui.layout_columns(
+        ui.output_plot("plot_confusion_matrix", height="260px"),
+        ui.div(
+            ui.h6("성능 지표", class_="fw-semibold"),
+            ui.output_table("metrics_table"),
+            class_="mt-2",
         ),
-        ui.card(
-            ui.input_action_button(
-                "btn_stream_stop",
-                "스트리밍 중지",
-                class_="w-100 btn-secondary",
-            ),
-        ),
-        ui.card(
-            ui.input_action_button(
-                "btn_stream_reset",
-                "스트리밍 초기화",
-                class_="w-100 btn-warning",
-            ),
-        ),
-        width=1 / 3,
-        gap="1rem",
-    ),
-    ui.navset_tab(
-        ui.nav_panel(
-            "MODEL",
-            ui.layout_column_wrap(
-                ui.card(
-                    ui.card_header("혼동행렬"),
-                    ui.output_plot("plot_model_confusion", height="360px"),
-                ),
-                ui.card(
-                    ui.card_header("성능지표"),
-                    ui.output_table("table_model_metrics"),
-                ),
-                ui.card(
-                    ui.card_header("Isolation Forest 혼동행렬"),
-                    ui.output_plot("plot_isolation_confusion", height="360px"),
-                ),
-                width=1 / 3,
-                gap="1rem",
-            ),
-        ),
-        ui.nav_panel(
-            "Interpretation",
-            ui.layout_column_wrap(
-                ui.card(
-                    ui.card_header("Partial Dependence (PDP)"),
-                    ui.input_select(
-                        "pdp_feature",
-                        "변수 선택",
-                        choices=list(PDP_FEATURES),
-                        selected=PDP_FEATURES[0] if PDP_FEATURES else None,
-                    ),
-                    ui.output_plot("plot_pdp_feature", height="360px"),
-                ),
-                ui.card(
-                    ui.card_header("불량 영향 변수 비율"),
-                    ui.input_date_range(
-                        "failure_period",
-                        "기간 설정",
-                        start=DATE_RANGE_START,
-                        end=DATE_RANGE_END,
-                        min=DATE_RANGE_START,
-                        max=DATE_RANGE_END,
-                    ),
-                    ui.output_plot("plot_failure_feature_share", height="360px"),
-                ),
-                width=1 / 2,
-                fill=True,
-                gap="1rem",
-            ),
-        ),
+        col_widths=[6, 6],
     ),
 )
-# 탭별 서버 --------------------------------------------------------------------
+
+buttons_card = ui.card(
+    ui.card_header("금형 코드"),
+    ui.output_ui("mold_buttons"),
+    style="flex:2 1 0;width:100%;",
+)
+
+distribution_card = ui.card(
+    ui.card_header("분포 분석"),
+    ui.div(
+        ui.input_action_button("btn_distribution_visual", "시각화", class_="btn btn-outline-secondary w-100"),
+        ui.input_action_button("btn_distribution_numeric", "수치화", class_="btn btn-outline-secondary w-100"),
+        ui.input_action_button("btn_distribution_hypothesis", "가설검정", class_="btn btn-outline-secondary w-100"),
+        class_="d-flex flex-column gap-2",
+    ),
+    style="flex:1 1 0;width:100%;",
+)
+
+
+plot_column = ui.div(plot_card, class_="h-100 d-flex flex-column w-100")
+
+right_column = ui.div(
+    buttons_card,
+    distribution_card,
+    class_="d-flex flex-column h-100 w-100",
+)
+
+tab_ui = ui.page_fluid(
+    ui.layout_columns(
+        plot_column,
+        right_column,
+        col_widths=[8, 4],
+        class_="align-items-stretch",
+    )
+)
+
+
 def tab_server(input, output, session):
-    @render.plot
-    def plot_model_confusion():
-        fig, ax = plt.subplots(figsize=(4, 3.8))
-        try:
-            cm, _ = _model_evaluation()
-            im = ax.imshow(cm, cmap="Blues")
-            ax.set_xticks([0, 1], CLASS_LABELS)
-            ax.set_yticks([0, 1], CLASS_LABELS)
-            ax.set_xlabel("예측")
-            ax.set_ylabel("실제")
-            for (i, j), value in np.ndenumerate(cm):
-                ax.text(j, i, int(value), ha="center", va="center", fontsize=12)
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            fig.tight_layout()
-        except (FileNotFoundError, KeyError) as err:
-            ax.set_axis_off()
-            ax.text(
-                0.5,
-                0.5,
-                str(err),
-                ha="center",
-                va="center",
-                fontsize=11,
-                wrap=True,
+    df_predictions = _load_predictions()
+    if "mold_code" in df_predictions.columns:
+        available_codes = set(df_predictions["mold_code"].dropna().astype(str))
+    else:
+        available_codes = set()
+    mold_codes = [code for code in MOLD_CODES if code in available_codes]
+    selected_mold = reactive.Value(mold_codes[0] if mold_codes else None)
+
+    @render.ui
+    def mold_buttons():
+        current = selected_mold.get()
+        buttons = []
+        codes_to_show = mold_codes if mold_codes else MOLD_CODES
+        for code in codes_to_show:
+            is_available = code in available_codes
+            is_active = code == current
+            classes = "btn w-100 mb-2 "
+            styles = ""
+            if is_active:
+                classes += "text-white"
+                styles = "background-color:#383636;border-color:#383636;"
+            else:
+                classes += "btn-outline-secondary"
+            buttons.append(
+                ui.input_action_button(
+                    f"btn_mold_{code}",
+                    code,
+                    class_=classes.strip(),
+                    disabled=not is_available,
+                    style=styles or None,
+                )
             )
+        if not buttons:
+            return ui.p("등록된 금형 코드가 없습니다.")
+        return ui.div(*buttons, class_="d-flex flex-column")
+
+    for code in MOLD_CODES:
+        btn_id = f"btn_mold_{code}"
+
+        @reactive.effect
+        def _update_selected(code=code, btn_id=btn_id):
+            btn = getattr(input, btn_id)
+            if btn() and code in available_codes and selected_mold.get() != code:
+                selected_mold.set(code)
+
+    def _filtered_predictions_df() -> pd.DataFrame:
+        filter_code = selected_mold.get()
+        if filter_code is not None and filter_code in available_codes:
+            return df_predictions.loc[df_predictions["mold_code"].astype(str) == filter_code]
+        return df_predictions
+
+    @render.plot
+    def plot_segment_f1():
+        df_filtered = _filtered_predictions_df()
+        segment_df = _segment_f1(df_filtered)
+        fig, ax = plt.subplots(figsize=(7.2, 4.5))
+
+        if segment_df.empty:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "표시할 데이터가 없습니다.", ha="center", va="center", fontsize=12)
+            return fig
+
+        x_positions = np.arange(1, SEGMENT_COUNT + 1)
+        f1_values = segment_df["f1"].to_numpy()
+        valid_mask = (~np.isnan(f1_values)) & (f1_values > 0)
+
+        threshold = 0.85
+        line_color = "#383636"
+        above_color = "#383636"
+        below_color = "#FF0000"
+        highlight_color = "#F9C5C5"
+
+        above_mask = valid_mask & (f1_values >= threshold)
+        below_mask = valid_mask & (f1_values < threshold)
+
+        for idx, is_low in enumerate(below_mask, start=1):
+            if is_low:
+                left = idx - 0.5
+                right = idx + 0.5
+                ax.axvspan(left, right, color=highlight_color, alpha=0.3, zorder=0)
+
+        ax.plot(x_positions[valid_mask], f1_values[valid_mask], color=line_color, linewidth=2, zorder=2)
+        if np.any(above_mask):
+            ax.scatter(
+                x_positions[above_mask],
+                f1_values[above_mask],
+                color=above_color,
+                edgecolor="white",
+                zorder=3,
+            )
+        if np.any(below_mask):
+            ax.scatter(
+                x_positions[below_mask],
+                f1_values[below_mask],
+                color=below_color,
+                edgecolor="white",
+                zorder=3,
+            )
+        ax.axhline(threshold, color="#C1121F", linestyle="--", linewidth=1.2)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("")
+        ax.grid(alpha=0.3)
+        ax.set_xticks(x_positions)
+        ax.set_xlim(0.5 - X_AXIS_MARGIN, SEGMENT_COUNT + 0.5 + X_AXIS_MARGIN)
+
+        if segment_df["timestamp"].notna().any():
+            tick_labels = [ts.strftime("%Y-%m-%d") if pd.notna(ts) else "" for ts in segment_df["timestamp"]]
+            ax.set_xticklabels(tick_labels, rotation=30, ha="right")
+            ax.set_xlabel("")
+        else:
+            ax.set_xticklabels([str(idx) for idx in x_positions])
+            ax.set_xlabel("구간 (1~15)")
+
+        for x, y in zip(x_positions[valid_mask], f1_values[valid_mask]):
+            ax.text(x, y, f"{y:.2f}", ha="center", va="bottom", fontsize=9)
+
+        fig.tight_layout()
+        return fig
+
+    @render.plot
+    def plot_confusion_matrix():
+        df_filtered = _filtered_predictions_df()
+        fig, ax = plt.subplots(figsize=(3.8, 3.2))
+
+        required_cols = {"passorfail", "prediction"}
+        if df_filtered.empty or not required_cols.issubset(df_filtered.columns):
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "혼동행렬을 표시할 데이터가 없습니다.", ha="center", va="center", fontsize=11)
+            return fig
+
+        data = df_filtered.loc[:, ["passorfail", "prediction"]].dropna()
+        if data.empty:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "혼동행렬을 표시할 데이터가 없습니다.", ha="center", va="center", fontsize=11)
+            return fig
+
+        y_true = data["passorfail"].astype(int)
+        y_pred = data["prediction"].astype(int)
+        cm = confusion_matrix(y_true, y_pred, labels=[1, 0])
+
+        im = ax.imshow(cm, cmap="Reds")
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, f"{cm[i, j]}", ha="center", va="center", color="black", fontsize=12)
+
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["불량", "정상"])
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(["불량", "정상"])
+        ax.set_xlabel("예측")
+        ax.set_ylabel("실제")
+
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
         return fig
 
     @render.table
-    def table_model_metrics():
-        try:
-            _, metrics = _model_evaluation()
-            return metrics
-        except (FileNotFoundError, KeyError) as err:
-            return pd.DataFrame([{"지표": "오류", "값": str(err)}])
+    def metrics_table():
+        df_filtered = _filtered_predictions_df()
+        required_cols = {"passorfail", "prediction"}
+        if df_filtered.empty or not required_cols.issubset(df_filtered.columns):
+            return pd.DataFrame({"지표": ["데이터 없음"], "값": ["-"]})
 
-    @render.plot
-    def plot_isolation_confusion():
-        fig, ax = plt.subplots(figsize=(4, 3.8))
-        try:
-            cm, _ = _isolation_evaluation()
-            im = ax.imshow(cm, cmap="Purples")
-            ax.set_xticks([0, 1], CLASS_LABELS)
-            ax.set_yticks([0, 1], CLASS_LABELS)
-            ax.set_xlabel("예측")
-            ax.set_ylabel("실제")
-            for (i, j), value in np.ndenumerate(cm):
-                ax.text(j, i, int(value), ha="center", va="center", fontsize=12)
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            fig.tight_layout()
-        except (FileNotFoundError, KeyError) as err:
-            ax.set_axis_off()
-            ax.text(
-                0.5,
-                0.5,
-                str(err),
-                ha="center",
-                va="center",
-                fontsize=11,
-                wrap=True,
-            )
-        return fig
+        data = df_filtered.loc[:, ["passorfail", "prediction"]].dropna()
+        if data.empty:
+            return pd.DataFrame({"지표": ["데이터 없음"], "값": ["-"]})
 
-    @render.plot
-    def plot_pdp_feature():
-        feature = input.pdp_feature()
-        fig, ax = plt.subplots(figsize=(6.5, 3.6))
+        y_true = data["passorfail"].astype(int)
+        y_pred = data["prediction"].astype(int)
 
-        if not feature:
-            ax.set_axis_off()
-            ax.text(
-                0.5,
-                0.5,
-                "변수를 선택하면 PDP가 표시됩니다.",
-                ha="center",
-                va="center",
-                fontsize=11,
-            )
-            return fig
+        metrics = {
+            "정확도 (Accuracy)": accuracy_score(y_true, y_pred),
+            "정밀도 (Precision)": precision_score(y_true, y_pred, zero_division=0),
+            "재현율 (Recall)": recall_score(y_true, y_pred, zero_division=0),
+            "F1-Score": f1_score(y_true, y_pred, zero_division=0),
+        }
 
-        try:
-            pdp_df, is_numeric = _compute_pdp(feature)
-            if is_numeric:
-                ax.plot(
-                    pdp_df["feature_value"],
-                    pdp_df["probability"],
-                    color="#2A9D8F",
-                    marker="o",
-                )
-                ax.fill_between(
-                    pdp_df["feature_value"],
-                    pdp_df["probability"],
-                    color="#2A9D8F",
-                    alpha=0.15,
-                )
-            else:
-                categories = pdp_df["feature_value"].astype(str)
-                ax.bar(categories, pdp_df["probability"], color="#E76F51", alpha=0.85)
-                plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
-                for idx, prob in enumerate(pdp_df["probability"]):
-                    ax.text(
-                        idx,
-                        prob,
-                        f"{prob:.2f}",
-                        ha="center",
-                        va="bottom",
-                        fontsize=9,
-                    )
+        metrics_df = pd.DataFrame(
+            {"지표": list(metrics.keys()), "값": [f"{value:.3f}" for value in metrics.values()]}
+        )
+        return metrics_df
 
-            ax.set_ylim(0, 1)
-            ax.set_ylabel("불량 확률")
-            ax.set_xlabel(feature)
-            ax.grid(alpha=0.3, axis="y")
-            fig.tight_layout()
-        except (FileNotFoundError, KeyError, ValueError, RuntimeError) as err:
-            ax.set_axis_off()
-            ax.text(
-                0.5,
-                0.5,
-                str(err),
-                ha="center",
-                va="center",
-                fontsize=11,
-                wrap=True,
-            )
-        return fig
-
-    @render.plot
-    def plot_failure_feature_share():
-        start, end = input.failure_period()
-        fig, ax = plt.subplots(figsize=(4, 3.6))
-        try:
-            counts_df = _top_feature_counts(start, end)
-            if counts_df.empty or counts_df["건수"].sum() == 0 or (
-                len(counts_df) == 1 and counts_df.iloc[0]["변수"] == "데이터 없음"
-            ):
-                ax.set_axis_off()
-                ax.text(
-                    0.5,
-                    0.5,
-                    "선택한 기간에 불량 예측이 없습니다.",
-                    ha="center",
-                    va="center",
-                    fontsize=11,
-                )
-                return fig
-
-            y_labels = counts_df["변수"]
-            x_values = counts_df["건수"]
-            ax.barh(y_labels, x_values, color="#457b9d")
-            for y, x, ratio in zip(y_labels, x_values, counts_df["비율"]):
-                ax.text(
-                    x + max(x_values) * 0.02,
-                    y,
-                    f"{x} ({ratio})",
-                    va="center",
-                    fontsize=10,
-                )
-            ax.set_xlabel("건수")
-            ax.set_ylabel("변수")
-            ax.grid(alpha=0.3, axis="x")
-            x_max = max(x_values)
-            ax.set_xlim(0, x_max * 1.25 if x_max > 0 else 1)
-            fig.subplots_adjust(left=0.42, right=0.98, top=0.95, bottom=0.15)
-        except (FileNotFoundError, KeyError, RuntimeError) as err:
-            ax.set_axis_off()
-            ax.text(
-                0.5,
-                0.5,
-                str(err),
-                ha="center",
-                va="center",
-                fontsize=11,
-                wrap=True,
-            )
-        return fig
