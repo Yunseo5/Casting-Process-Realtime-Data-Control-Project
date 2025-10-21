@@ -635,9 +635,8 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
     def _handle_defect_row_selection():
         try:
             selected = input.tab_log_table_defect_selected_rows()
+            # 선택이 없으면 기존 분석 결과 유지 (초기화하지 않음)
             if not selected:
-                selected_row_data.set(None)
-                analysis_result.set(None)
                 return
             df = shared_df.get()
             if df.empty:
