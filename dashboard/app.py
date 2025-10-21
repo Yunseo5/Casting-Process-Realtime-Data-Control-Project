@@ -237,19 +237,19 @@ body { background: #383636; font-family: -apple-system, BlinkMacSystemFont, "Seg
     z-index: 1;
 }
 
-/* FAB 색상 - 시작 (빨간색) */
+/* FAB 색상 - 시작 (초록색) */
 .fab-start {
-    background: linear-gradient(135deg, #8E0000 0%, #b30000 100%);
+    background: linear-gradient(135deg, #556B35 0%, #6b8641 100%);
     color: #fff;
 }
 
 .fab-start:hover {
-    background: linear-gradient(135deg, #b30000 0%, #d60000 100%);
+    background: linear-gradient(135deg, #6b8641 0%, #7a9850 100%);
 }
 
-/* FAB 색상 - 정지 (초록색) */
+/* FAB 색상 - 정지 (빨간색) */
 .fab-stop {
-    background: linear-gradient(135deg, #556B35 0%, #6b8641 100%);
+    background: linear-gradient(135deg, #8E0000 0%, #b30000 100%);
     color: #fff;
 }
 
