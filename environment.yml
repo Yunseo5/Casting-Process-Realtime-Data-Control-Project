@@ -16,6 +16,7 @@ dependencies:
   - git
   - matplotlib
   - seaborn
+  - joblib
   - pip:
     - dash
     - dash-bootstrap-components
@@ -47,3 +48,4 @@ dependencies:
     - optuna
     - imbalanced-learn
     - lightgbm
+    - shap
