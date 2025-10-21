@@ -5,7 +5,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-DATA_PATH = Path(__file__).parent.parent.parent / "data" / "raw" / "train.csv"
+try:
+    import joblib  # type: ignore
+except ImportError:
+    joblib = None
+
+try:
+    import shap  # type: ignore
+except ImportError:
+    shap = None
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_PATH = BASE_DIR / "data" / "raw" / "train.csv"
+MODEL_ARTIFACT_PATH = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
+PI_TABLE_PATH = BASE_DIR / "reports" / "permutation_importance_valid.csv"
+
+PDP_GRID_SIZE = 15
+ICE_SAMPLE_SIZE = 25
+MODEL_SAMPLE_SIZE = 600
+SHAP_TOP_K = 10
+MCI_THRESHOLD = 0.2
+MCI_QUANTILES = (0.05, 0.95)
+CPK_STATUS_RULES = [
+    ("안정", 1.33),
+    ("주의", 1.0),
+]
 
 
 def read_raw_data():
@@ -38,12 +62,13 @@ VARIABLE_LABELS = {
     "sleeve_temperature": "슬리브 온도",
     "physical_strength": "물리적 강도",
     "Coolant_temperature": "냉각수 온도",
+    "EMS_operation_time": "EMS 작동 시간",
 }
 
 # 데이터 로드 및 필터링 함수
 def load_and_filter_data(date_start=None, date_end=None, mold_codes=None):
     df = read_raw_data()
-    
+
     # 금형 코드 필터링
     if mold_codes:
         if 'mold_code' not in df.columns:
@@ -55,8 +80,428 @@ def load_and_filter_data(date_start=None, date_end=None, mold_codes=None):
         df = df[df['registration_time'].dt.date >= pd.to_datetime(date_start).date()]
     if date_end is not None:
         df = df[df['registration_time'].dt.date <= pd.to_datetime(date_end).date()]
-    
+
     return df
+
+
+def load_model_artifact():
+    if joblib is None or not MODEL_ARTIFACT_PATH.exists():
+        return None
+    try:
+        return joblib.load(MODEL_ARTIFACT_PATH)
+    except Exception:
+        return None
+
+
+def derive_model_metadata():
+    metadata = {
+        "numeric": [],
+        "categorical": [],
+        "all": [],
+        "numeric_defaults": {},
+        "categorical_defaults": {},
+    }
+
+    try:
+        df = read_raw_data()
+    except Exception:
+        return metadata
+
+    feature_df = df.drop(columns=["passorfail", "registration_time"], errors="ignore").copy()
+    metadata["all"] = feature_df.columns.tolist()
+
+    numeric_cols = feature_df.select_dtypes(include=[np.number]).columns.tolist()
+    metadata["numeric"] = numeric_cols
+    metadata["categorical"] = [col for col in metadata["all"] if col not in numeric_cols]
+
+    if numeric_cols:
+        numeric_defaults = (
+            feature_df[numeric_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .median()
+            .fillna(0.0)
+        )
+        metadata["numeric_defaults"] = numeric_defaults.to_dict()
+
+    cat_defaults = {}
+    for col in metadata["categorical"]:
+        series = feature_df[col].dropna()
+        if not series.empty:
+            cat_defaults[col] = series.mode().iloc[0]
+        else:
+            cat_defaults[col] = "<NA>"
+    metadata["categorical_defaults"] = cat_defaults
+
+    return metadata
+
+
+def synchronize_model_metadata(metadata, bundle):
+    if bundle is None:
+        return metadata
+
+    numeric_cols = metadata.get("numeric", [])
+    categorical_cols = metadata.get("categorical", [])
+
+    scaler = bundle.get("scaler")
+    ordinal_encoder = bundle.get("ordinal_encoder")
+
+    if scaler is not None:
+        scaler_cols = getattr(scaler, "feature_names_in_", None)
+        if scaler_cols is not None:
+            numeric_cols = list(scaler_cols)
+    if ordinal_encoder is not None:
+        encoder_cols = getattr(ordinal_encoder, "feature_names_in_", None)
+        if encoder_cols is not None:
+            categorical_cols = list(encoder_cols)
+
+    metadata["numeric"] = list(numeric_cols)
+    metadata["categorical"] = list(categorical_cols)
+
+    numeric_defaults = dict(metadata.get("numeric_defaults", {}))
+    metadata["numeric_defaults"] = {
+        col: numeric_defaults.get(col, 0.0) for col in metadata["numeric"]
+    }
+    categorical_defaults = dict(metadata.get("categorical_defaults", {}))
+    metadata["categorical_defaults"] = {
+        col: categorical_defaults.get(col, "<NA>") for col in metadata["categorical"]
+    }
+
+    metadata["all"] = list(dict.fromkeys(metadata["numeric"] + metadata["categorical"]))
+    return metadata
+
+
+def transform_for_model(df, metadata, bundle):
+    if bundle is None:
+        return None, None, "모델 아티팩트를 불러오지 못했습니다."
+
+    numeric_cols = metadata.get("numeric", [])
+    categorical_cols = metadata.get("categorical", [])
+    all_columns = metadata.get("all", [])
+
+    if not all_columns:
+        return None, None, "모델 입력 컬럼 정보가 비어 있습니다."
+
+    df_features = df.copy()
+    for col in all_columns:
+        if col not in df_features.columns:
+            if col in numeric_cols:
+                df_features[col] = metadata["numeric_defaults"].get(col, 0.0)
+            else:
+                df_features[col] = metadata["categorical_defaults"].get(col, "<NA>")
+
+    df_features = df_features[all_columns]
+
+    scaler = bundle.get("scaler")
+    ordinal_encoder = bundle.get("ordinal_encoder")
+    onehot_encoder = bundle.get("onehot_encoder")
+
+    if numeric_cols:
+        num_frame = df_features[numeric_cols].apply(pd.to_numeric, errors="coerce")
+        fill_map = {col: metadata["numeric_defaults"].get(col, 0.0) for col in numeric_cols}
+        num_frame = num_frame.fillna(fill_map)
+        if scaler is not None:
+            try:
+                num_array = scaler.transform(num_frame.to_numpy())
+            except Exception as exc:
+                return None, None, f"수치형 스케일링 실패: {exc}"
+        else:
+            num_array = num_frame.to_numpy(dtype=float)
+    else:
+        num_array = np.empty((len(df_features), 0))
+
+    ohe_feature_names = []
+    if categorical_cols:
+        if ordinal_encoder is None or onehot_encoder is None:
+            return None, None, "범주형 인코더가 누락되었습니다."
+        cat_frame = (
+            df_features[categorical_cols]
+            .fillna({col: metadata["categorical_defaults"].get(col, "<NA>") for col in categorical_cols})
+            .astype(str)
+        )
+        try:
+            cat_ord = ordinal_encoder.transform(cat_frame)
+            cat_ohe = onehot_encoder.transform(cat_ord)
+        except Exception as exc:
+            return None, None, f"범주형 인코딩 실패: {exc}"
+        try:
+            ohe_feature_names = onehot_encoder.get_feature_names_out(categorical_cols).tolist()
+        except AttributeError:
+            ohe_feature_names = [f"{col}_{idx}" for col in categorical_cols for idx in range(cat_ohe.shape[1])]
+    else:
+        cat_ohe = np.empty((len(df_features), 0))
+
+    if num_array.size or cat_ohe.size:
+        feature_matrix = np.hstack([arr for arr in (num_array, cat_ohe) if arr.size])
+    else:
+        feature_matrix = np.zeros((len(df_features), 0))
+
+    feature_names = list(numeric_cols) + list(ohe_feature_names)
+    return feature_matrix, feature_names, None
+
+
+def predict_proba_with_model(df, metadata, bundle):
+    model = bundle.get("model") if bundle else None
+    if model is None:
+        return None, None, "LightGBM 모델을 찾을 수 없습니다."
+
+    feature_matrix, feature_names, error = transform_for_model(df, metadata, bundle)
+    if error:
+        return None, None, error
+
+    try:
+        probs = model.predict(feature_matrix)
+    except Exception as exc:
+        return None, None, f"예측 실패: {exc}"
+
+    return probs, feature_names, None
+
+
+def compute_pdp_curve(df, variable, metadata, bundle, grid_size=PDP_GRID_SIZE, sample_size=MODEL_SAMPLE_SIZE):
+    if variable not in metadata.get("all", []):
+        return None, f"'{variable}' 컬럼을 찾을 수 없습니다."
+
+    if df.empty:
+        return None, "분석할 데이터가 없습니다."
+
+    sample_df = df[metadata.get("all", [])].copy()
+    sample_df = sample_df.sample(n=min(sample_size, len(sample_df)), random_state=41)
+
+    if variable not in metadata.get("numeric", []):
+        return None, "현재 PDP 계산은 수치형 변수만 지원합니다."
+
+    series = pd.to_numeric(sample_df[variable], errors="coerce").dropna()
+    if series.empty:
+        return None, "선택한 변수에 유효한 값이 없습니다."
+
+    low = series.quantile(0.05)
+    high = series.quantile(0.95)
+    if not np.isfinite(low) or not np.isfinite(high) or low == high:
+        low, high = series.min(), series.max()
+
+    if not np.isfinite(low) or not np.isfinite(high) or low == high:
+        return None, "선택한 변수의 범위가 충분하지 않습니다."
+
+    grid = np.linspace(low, high, grid_size)
+    averages = []
+    for value in grid:
+        temp = sample_df.copy()
+        temp[variable] = value
+        probs, _, error = predict_proba_with_model(temp, metadata, bundle)
+        if error:
+            return None, error
+        averages.append(float(np.mean(probs)))
+
+    return {"grid": grid.tolist(), "averages": averages}, None
+
+
+def find_largest_safe_interval(grid, averages, threshold):
+    if not grid or not averages:
+        return None
+
+    pairs = sorted(
+        [
+            (float(x), float(y))
+            for x, y in zip(grid, averages)
+            if np.isfinite(x) and np.isfinite(y)
+        ],
+        key=lambda item: item[0],
+    )
+
+    segments = []
+    start = None
+    last_val = None
+    for x, y in pairs:
+        if y <= threshold:
+            if start is None:
+                start = x
+            last_val = x
+        else:
+            if start is not None and last_val is not None:
+                segments.append((start, last_val))
+                start = None
+                last_val = None
+
+    if start is not None and last_val is not None:
+        segments.append((start, last_val))
+
+    if not segments:
+        return None
+
+    segments.sort(key=lambda seg: seg[1] - seg[0], reverse=True)
+    safe_min, safe_max = segments[0]
+    if safe_min == safe_max:
+        return None
+    return safe_min, safe_max
+
+
+MODEL_METADATA = synchronize_model_metadata(derive_model_metadata(), load_model_artifact())
+_MODEL_BUNDLE_CACHE = {"bundle": None, "loaded": False}
+
+
+def get_model_bundle():
+    if not _MODEL_BUNDLE_CACHE["loaded"]:
+        _MODEL_BUNDLE_CACHE["bundle"] = load_model_artifact()
+        _MODEL_BUNDLE_CACHE["loaded"] = True
+    bundle = _MODEL_BUNDLE_CACHE["bundle"]
+    if bundle is not None:
+        synchronize_model_metadata(MODEL_METADATA, bundle)
+    return bundle
+
+
+MCI_CONFIGS = [
+    {
+        "id": "mci_melt",
+        "variable": "molten_temp",
+        "label": "녹이기 (용탕 온도)",
+        "threshold": MCI_THRESHOLD,
+    },
+    {
+        "id": "mci_pour",
+        "variable": "cast_pressure",
+        "label": "주입 (주조 압력)",
+        "threshold": MCI_THRESHOLD,
+    },
+    {
+        "id": "mci_cool",
+        "variable": "upper_mold_temp1",
+        "label": "냉각 (상부 금형 온도1)",
+        "threshold": MCI_THRESHOLD,
+    },
+]
+
+def evaluate_mci_metric(df, variable, label, bundle, metadata, threshold=MCI_THRESHOLD, quantiles=MCI_QUANTILES):
+    result = {
+        "variable": variable,
+        "label": label,
+        "cpk": None,
+        "status": "데이터 부족",
+        "safe_min": None,
+        "safe_max": None,
+        "actual_min": None,
+        "actual_max": None,
+        "mean": None,
+        "std": None,
+        "details": None,
+    }
+
+    if df.empty:
+        result["details"] = "분석할 데이터가 없습니다."
+        return result
+
+    if variable not in df.columns:
+        result["details"] = f"'{variable}' 컬럼을 찾을 수 없습니다."
+        return result
+
+    if variable not in metadata.get("numeric", []):
+        result["details"] = "현재 MCI 계산은 수치형 변수만 지원합니다."
+        return result
+
+    pdp_payload, error = compute_pdp_curve(df, variable, metadata, bundle)
+    if error:
+        result["details"] = error
+        return result
+
+    safe_range = find_largest_safe_interval(
+        pdp_payload["grid"],
+        pdp_payload["averages"],
+        threshold,
+    )
+
+    series = pd.to_numeric(df[variable], errors="coerce").dropna()
+    if series.empty:
+        result["details"] = "실제 공정 데이터가 부족합니다."
+        return result
+
+    actual_min, actual_max = series.quantile(list(quantiles))
+    if not np.isfinite(actual_min) or not np.isfinite(actual_max):
+        result["details"] = "실제 공정 범위를 계산할 수 없습니다."
+        return result
+
+    actual_min = float(actual_min)
+    actual_max = float(actual_max)
+    result["actual_min"] = actual_min
+    result["actual_max"] = actual_max
+
+    if safe_range is None:
+        result["status"] = "위험"
+        result["details"] = "허용 구간을 찾지 못했습니다."
+        return result
+    safe_min, safe_max = safe_range
+    result["safe_min"] = safe_min
+    result["safe_max"] = safe_max
+
+    mean = float(series.mean())
+    std = float(series.std(ddof=1))
+    result["mean"] = mean
+    result["std"] = std
+
+    if not np.isfinite(std) or std <= 0:
+        result["status"] = "위험"
+        result["details"] = "표준편차를 계산할 수 없습니다."
+        return result
+
+    cpu = (safe_max - mean) / (3 * std)
+    cpl = (mean - safe_min) / (3 * std)
+    cpk = min(cpu, cpl)
+    result["cpk"] = cpk
+
+    if cpk < 0:
+        result["status"] = "위험"
+        result["details"] = "평균이 허용 구간 밖에 있습니다."
+        return result
+
+    for status, threshold_value in CPK_STATUS_RULES:
+        if cpk >= threshold_value:
+            result["status"] = status
+            break
+    else:
+        result["status"] = "위험"
+    result["details"] = None
+
+    return result
+
+
+def summarize_mci_status(cpk_value):
+    if cpk_value is None:
+        return "데이터 부족"
+    if cpk_value < 0:
+        return "위험"
+    for status, threshold_value in CPK_STATUS_RULES:
+        if cpk_value >= threshold_value:
+            return status
+    return "위험"
+
+
+def compute_mci_metrics(df, metadata, bundle):
+    if bundle is None:
+        return {"error": "모델 아티팩트를 찾을 수 없습니다.", "metrics": [], "overall_ratio": None}
+
+    metrics = []
+    for config in MCI_CONFIGS:
+        metric = evaluate_mci_metric(
+            df,
+            config["variable"],
+            config["label"],
+            bundle,
+            metadata,
+            threshold=config.get("threshold", MCI_THRESHOLD),
+        )
+        metrics.append(metric)
+
+    valid_cpk = [m["cpk"] for m in metrics if m["cpk"] is not None]
+    if valid_cpk:
+        overall_cpk = min(valid_cpk)
+        overall_status = summarize_mci_status(overall_cpk)
+    else:
+        overall_cpk = None
+        overall_status = "데이터 부족"
+
+    return {
+        "metrics": metrics,
+        "overall_cpk": overall_cpk,
+        "overall_status": overall_status,
+        "error": None,
+    }
 
 # P 관리도 계산 함수 (날짜 기반 - registration_time 사용)
 def calculate_p_chart_by_date(df):
@@ -236,6 +681,17 @@ def calculate_xbar_r_chart(df, variable, subgroup_size=5):
 # 탭별 UI
 tab_ui = ui.page_fluid(
     ui.h2("품질 관리팀 - 관리도", class_="mb-4"),
+    ui.tags.style("""
+    .mci-metric-card{padding:10px 12px;border-radius:12px;min-height:110px}
+    .mci-metric-card h3{font-size:1.35rem;margin-bottom:2px;font-weight:700}
+    .mci-value-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+    .mci-status-badge{font-weight:800;font-size:3rem;margin-left:8px;line-height:1}
+    .mci-metric-card .mci-detail{font-size:0.75rem;color:#6c757d;margin:0}
+    .mci-overall-card{background:#f7f9fc}
+    .mci-cards-row{gap:12px}
+    """),
+
+    ui.output_ui("mci_overview"),
     
     ui.card(
         ui.card_header("필터 설정"),
@@ -370,7 +826,7 @@ def tab_server(input, output, session):
             subgroup_start_value = input.subgroup_start()
             subgroup_end_value = input.subgroup_end()
             variable = input.xbar_variable()
-        
+
         subgroup_size = int(subgroup_size_value) if subgroup_size_value is not None else 5
         subgroup_start = int(subgroup_start_value) if subgroup_start_value is not None else 0
         subgroup_end = int(subgroup_end_value) if subgroup_end_value is not None else subgroup_start + 100
@@ -384,7 +840,114 @@ def tab_server(input, output, session):
             "subgroup_end": subgroup_end,
             "variable": variable,
         }
-    
+
+    @reactive.Calc
+    def mci_dataset():
+        filters = current_filters()
+        mold_codes = filters["mold_codes"] or None
+        date_range = filters["date_range"]
+        date_start = date_range[0] if date_range else None
+        date_end = date_range[1] if date_range else None
+
+        df = load_and_filter_data(date_start=date_start, date_end=date_end, mold_codes=mold_codes)
+        if df.empty:
+            return pd.DataFrame()
+        return df.reset_index(drop=True)
+
+    @reactive.Calc
+    def mci_metrics():
+        input.apply_filter()
+        bundle = get_model_bundle()
+        df = mci_dataset()
+        return compute_mci_metrics(df, MODEL_METADATA, bundle)
+
+    @render.ui
+    def mci_overview():
+        metrics_payload = mci_metrics()
+        error = metrics_payload.get("error")
+        if error:
+            return ui.card(ui.card_body(ui.p(error, class_="text-danger")), class_="mb-3")
+
+        status_colors = {
+            "안정": "#2ecc71",
+            "주의": "#f39c12",
+            "위험": "#e74c3c",
+            "데이터 부족": "#95a5a6",
+        }
+
+        def format_cpk(value):
+            if value is None:
+                return "Cpk --"
+            return f"Cpk {value:.2f}"
+
+        def format_range(min_val, max_val):
+            if min_val is None or max_val is None:
+                return "데이터 없음"
+            return f"[{min_val:.2f}, {max_val:.2f}]"
+
+        def format_sigma(value):
+            if value is None or not np.isfinite(value):
+                return "σ: 계산 불가"
+            return f"σ: {value:.3f}"
+
+        cards = []
+
+        overall_cpk = metrics_payload.get("overall_cpk")
+        overall_status = metrics_payload.get("overall_status", "데이터 부족")
+        overall_color = status_colors.get(overall_status, "#95a5a6")
+
+        cards.append(
+            ui.card(
+                ui.card_body(
+                    ui.h6("모델 기반 Cpk (최소)", class_="text-muted text-uppercase mb-2"),
+                    ui.div(
+                        ui.h3(format_cpk(overall_cpk), class_="mb-0"),
+                        ui.span(overall_status, class_="mci-status-badge", style=f"color:{overall_color};"),
+                        class_="mci-value-row",
+                    ),
+                ),
+                class_="mci-metric-card mci-overall-card",
+            )
+        )
+
+        for metric in metrics_payload.get("metrics", []):
+            status = metric.get("status", "데이터 부족")
+            color = status_colors.get(status, "#95a5a6")
+
+            cards.append(
+                ui.card(
+                    ui.card_body(
+                        ui.h6(metric.get("label", metric.get("variable", "")), class_="text-muted text-uppercase mb-2"),
+                        ui.div(
+                            ui.h3(format_cpk(metric.get("cpk")), class_="mb-0"),
+                            ui.span(status, class_="mci-status-badge", style=f"color:{color};"),
+                            class_="mci-value-row",
+                        ),
+                        ui.p(
+                            f"허용 {format_range(metric.get('safe_min'), metric.get('safe_max'))} · 실제 {format_range(metric.get('actual_min'), metric.get('actual_max'))}",
+                            class_="mci-detail",
+                        ),
+                        ui.p(
+                            (
+                                f"μ {metric.get('mean'):.2f}"
+                                if metric.get("mean") is not None and np.isfinite(metric.get("mean"))
+                                else "μ 계산 불가"
+                            )
+                            + " · "
+                            + format_sigma(metric.get("std")),
+                            class_="mci-detail",
+                        ),
+                        ui.p(metric.get("details", ""), class_="mci-detail") if metric.get("details") else ui.div(),
+                    ),
+                    class_="mci-metric-card",
+                )
+            )
+
+        return ui.div(
+            ui.layout_columns(*cards, col_widths=[3] * len(cards)),
+            class_="mb-3 mci-cards-row",
+        )
+
     @render.plot
     def plot_p_chart():
         # 필터 적용 (버튼 클릭 시)
