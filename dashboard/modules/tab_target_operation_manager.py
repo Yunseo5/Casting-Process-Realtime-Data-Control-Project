@@ -61,7 +61,7 @@ ALERT_STATUS_TEXT = {
     "no_data": "데이터 없음",
 }
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parents[1]
 BASELINE_FILE = BASE_DIR / "data" / "processed" / "train_v1_time.csv"
 
 MAD_THRESHOLD = 2.5

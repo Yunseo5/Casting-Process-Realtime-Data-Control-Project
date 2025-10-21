@@ -36,7 +36,7 @@ def setup_korean_font():
 setup_korean_font()
 
 # 경로 및 상수
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parents[1]
 MODEL_PATH = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
 DROP_COLUMNS = ['line', 'name', 'mold_name', 'date', 'time', 'Unnamed: 0', 'id']
 
