@@ -1,8 +1,11 @@
 from shiny import ui, render, reactive
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import matplotlib
+import math
+from pathlib import Path
 matplotlib.use('Agg')
 
 # 한글 폰트 설정
@@ -43,6 +46,67 @@ VARIABLES = {
 # 기본 선택 변수 (처음 3개)
 DEFAULT_VARIABLES = ["molten_temp", "facility_operation_cycleTime", "production_cycletime"]
 
+ALERT_VARIABLES = [
+    ("cast_pressure", "주조 압력"),
+    ("upper_mold_temp1", "상부 금형 온도1"),
+    ("low_section_speed", "저속 구간 속도"),
+    ("biscuit_thickness", "비스킷 두께"),
+]
+
+ALERT_STATUS_TEXT = {
+    "normal": "정상",
+    "warning": "WARNING (값 튐)",
+    "drift": "DRIFT (추세 이상)",
+    "critical": "CRITICAL (즉시 조치)",
+    "no_data": "데이터 없음",
+}
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+BASELINE_FILE = BASE_DIR / "data" / "processed" / "train_v1_time.csv"
+
+MAD_THRESHOLD = 2.5
+EWMA_LAMBDA = 0.3
+EWMA_REQUIRED_RUNS = 2
+EWMA_SIGMA = math.sqrt(EWMA_LAMBDA / (2 - EWMA_LAMBDA)) if 0 < EWMA_LAMBDA < 1 else 1.0
+EWMA_LIMIT = 2 * EWMA_SIGMA
+EWMA_TRACKER = {}
+
+
+def load_baseline_stats(path: Path, variables):
+    stats = {}
+    if not path.exists():
+        return stats
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return stats
+
+    keys = [key for key, _ in variables]
+    for key in keys:
+        if key not in df.columns:
+            continue
+        series = pd.to_numeric(df[key], errors="coerce").dropna()
+        if series.empty:
+            continue
+        median = float(series.median())
+        mad = float(np.median(np.abs(series - median)))
+        if not np.isfinite(mad) or mad == 0.0:
+            q75, q25 = series.quantile([0.75, 0.25])
+            iqr = float(q75 - q25)
+            if np.isfinite(iqr) and iqr != 0.0:
+                mad = iqr / 1.349
+        if not np.isfinite(mad) or mad == 0.0:
+            std = float(series.std(ddof=1))
+            if np.isfinite(std) and std != 0.0:
+                mad = std / 1.4826
+        if not np.isfinite(mad) or mad == 0.0:
+            mad = 1.0
+        stats[key] = {"median": median, "mad": max(mad, 1e-6)}
+    return stats
+
+
+BASELINE_STATS = load_baseline_stats(BASELINE_FILE, ALERT_VARIABLES)
+
 # CSS
 STYLES = """
 .main-container{max-width:1400px;margin:0 auto;padding:20px 0}
@@ -61,8 +125,31 @@ border:none;border-radius:0;box-shadow:none;min-width:280px;overflow:hidden}
 .status-row{display:flex;flex-direction:column;align-items:center;gap:12px;width:100%}
 .status-indicator-circle{width:70px;height:70px;border-radius:50%;border:4px solid #333;flex-shrink:0;
 transition:all 0.3s ease;background:#666;box-shadow:none}
-.status-indicator-circle.active-defect{background:#C00000;box-shadow:0 0 30px rgba(192,0,0,.6)}
+.status-indicator-circle.status-green{background:#3B7D23;box-shadow:0 0 20px rgba(59,125,35,.45)}
+.status-indicator-circle.status-warning{background:#f0ad4e;box-shadow:0 0 20px rgba(240,173,78,.5)}
+.status-indicator-circle.status-drift{background:#3498db;box-shadow:0 0 20px rgba(52,152,219,.5)}
+.status-indicator-circle.status-critical{background:#C00000;box-shadow:0 0 30px rgba(192,0,0,.6)}
+.status-indicator-circle.status-muted{background:#bdc3c7;box-shadow:0 0 12px rgba(189,195,199,.45)}
 .status-indicator-label{font-size:17px;font-weight:700;color:#111;white-space:nowrap;text-align:center}
+.defect-overlay{position:fixed;top:24px;right:24px;width:260px;background:#fff;border-radius:16px;padding:18px;
+box-shadow:0 10px 24px rgba(0,0,0,.18);display:none;flex-direction:column;gap:14px;z-index:9999;cursor:default}
+.defect-overlay.visible{display:flex}
+.overlay-header{display:flex;justify-content:space-between;align-items:center;font-weight:700;color:#111;cursor:move;user-select:none}
+.overlay-close-btn{border:none;background:transparent;font-size:20px;line-height:1;cursor:pointer;color:#666}
+.overlay-close-btn:hover{color:#000}
+.overlay-light-list{display:flex;flex-direction:column;gap:12px}
+.overlay-light-row{display:flex;align-items:center;gap:12px}
+.overlay-light-row .status-indicator-circle{width:38px;height:38px;border:3px solid #1f1f1f;box-shadow:0 0 12px rgba(0,0,0,.15)}
+.overlay-light-name{font-size:13px;font-weight:600;color:#2c3e50}
+.overlay-light-text{display:flex;flex-direction:column;gap:2px}
+.overlay-light-status{font-size:12px;font-weight:700;color:#7f8c8d}
+.overlay-light-status.level-normal{color:#2ecc71}
+.overlay-light-status.level-warning{color:#f39c12}
+.overlay-light-status.level-drift{color:#2980b9}
+.overlay-light-status.level-critical{color:#e74c3c}
+.overlay-light-status.level-no_data{color:#7f8c8d}
+.overlay-light-grid{display:flex;flex-wrap:wrap;gap:12px}
+.overlay-light-grid .overlay-light-row{flex:1 1 48%;min-width:120px}
 .custom-card{background:#fff;border-radius:16px;padding:24px;margin-bottom:24px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .card-header-title{font-size:18px;font-weight:700;color:#2A2D30;margin-bottom:20px;padding-bottom:12px;
 border-bottom:2px solid #e0e0e0}
@@ -94,6 +181,17 @@ def create_light(light_id, label):
     return ui.div(ui.div(id=light_id, class_="status-indicator-circle"),
                   ui.div(label, class_="status-indicator-label"), class_="status-row")
 
+def create_overlay_light(light_id, label, status_id):
+    return ui.div(
+        ui.div(id=light_id, class_="status-indicator-circle status-muted"),
+        ui.div(
+            ui.span(label, class_="overlay-light-name"),
+            ui.span("데이터 없음", id=status_id, class_="overlay-light-status level-no_data"),
+            class_="overlay-light-text",
+        ),
+        class_="overlay-light-row",
+    )
+
 def get_label(variable):
     return VARIABLES.get(variable, variable).split(' (')[0]
 
@@ -107,8 +205,14 @@ tab_ui = ui.page_fluid(
                 create_kpi("제품 사이클 타임", "kpi_cycle", "평균 사이클 타임", "yellow-line"),
                 create_kpi("설비 가동률", "kpi_uptime", "현재 가동 상태", "navy-line"),
                 col_widths=[4,4,4]), style="flex:3"),
-            ui.div(ui.div(create_light("defect_indicator", "불량 발생"),
-                         class_="status-panel"), style="flex:1"),
+            ui.div(
+                ui.div(
+                    create_light("defect_indicator", "불량 발생"),
+                    ui.input_action_button("toggle_defect_overlay", "⚠ 경보 창 띄우기", class_="btn btn-outline-danger btn-sm"),
+                    class_="status-panel"
+                ),
+                style="flex:1"
+            ),
             style="display:flex;gap:24px;margin-bottom:24px"),
         ui.div(ui.div("검색 및 설정", class_="card-header-title"),
                ui.div(ui.p("Mold Code 검색", style="font-weight:600;margin-bottom:12px;margin-top:16px"),
@@ -125,8 +229,71 @@ tab_ui = ui.page_fluid(
                ui.div(ui.output_data_frame("tab1_table_realtime"), class_="table-container"),
                class_="custom-card"),
         class_="main-container"),
+    ui.div(
+        ui.div("불량 경보", ui.tags.button("×", id="close_defect_overlay", class_="overlay-close-btn", **{"aria-label": "닫기"}), class_="overlay-header"),
+        ui.div(
+            create_overlay_light("overlay_light_defect", "불량 발생", "overlay_status_defect"),
+            create_overlay_light("overlay_light_cast_pressure", "주조 압력", "overlay_status_cast_pressure"),
+            create_overlay_light("overlay_light_upper_mold_temp1", "상부 금형 온도1", "overlay_status_upper_mold_temp1"),
+            create_overlay_light("overlay_light_low_section_speed", "저속 구간 속도", "overlay_status_low_section_speed"),
+            create_overlay_light("overlay_light_biscuit_thickness", "비스킷 두께", "overlay_status_biscuit_thickness"),
+            class_="overlay-light-grid"
+        ),
+        id="defect-overlay",
+        class_="defect-overlay"
+    ),
     ui.tags.script("""
     $(document).ready(function(){
+      var overlay = $('#defect-overlay');
+      var isDragging = false;
+      var dragOffset = {x:0,y:0};
+      $(document).on('click', '#toggle_defect_overlay', function(){
+        overlay.toggleClass('visible');
+        if (overlay.hasClass('visible')){
+          var storedLeft = overlay.data('pos-left');
+          var storedTop = overlay.data('pos-top');
+          if (storedLeft){
+            overlay.css({left: storedLeft, top: storedTop || '24px', right: 'auto'});
+          } else {
+            overlay.css({top:'24px', right:'24px', left:'auto'});
+          }
+        } else {
+          $(document).off('.defectDrag');
+          isDragging = false;
+        }
+      });
+      $(document).on('click', '#close_defect_overlay', function(){
+        overlay.removeClass('visible');
+        $(document).off('.defectDrag');
+        isDragging = false;
+      });
+      $(document).on('mousedown', '#defect-overlay .overlay-header', function(e){
+        if ($(e.target).closest('.overlay-close-btn').length){
+          return;
+        }
+        if (!overlay.hasClass('visible')){
+          return;
+        }
+        isDragging = true;
+        var rect = overlay[0].getBoundingClientRect();
+        dragOffset.x = e.clientX - rect.left;
+        dragOffset.y = e.clientY - rect.top;
+        overlay.css({right:'auto'});
+        $(document).on('mousemove.defectDrag', function(ev){
+          if (!isDragging) return;
+          var newLeft = ev.clientX - dragOffset.x;
+          var newTop = ev.clientY - dragOffset.y;
+          overlay.css({left: newLeft + 'px', top: newTop + 'px'});
+        });
+        $(document).on('mouseup.defectDrag', function(){
+          if (!isDragging) return;
+          isDragging = false;
+          overlay.data('pos-left', overlay.css('left'));
+          overlay.data('pos-top', overlay.css('top'));
+          $(document).off('.defectDrag');
+        });
+        e.preventDefault();
+      });
       var codes = ['all', '8412', '8917', '8722', '8413', '8576'];
       var toggleHTML = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px">';
       codes.forEach(function(code, idx){
@@ -183,13 +350,96 @@ tab_ui = ui.page_fluid(
     // 불량 센서 상태 업데이트 핸들러
     Shiny.addCustomMessageHandler('update_sensors', function(data) {
         var defectEl = document.getElementById('defect_indicator');
-        
+
+        var levelCircleClass = {
+            "normal": "status-green",
+            "warning": "status-warning",
+            "drift": "status-drift",
+            "critical": "status-critical",
+            "no_data": "status-muted"
+        };
+        var levelStatusClass = {
+            "normal": "level-normal",
+            "warning": "level-warning",
+            "drift": "level-drift",
+            "critical": "level-critical",
+            "no_data": "level-no_data"
+        };
+        var levelKeysCircle = ["status-green","status-warning","status-drift","status-critical","status-muted"];
+        var levelKeysStatus = ["level-normal","level-warning","level-drift","level-critical","level-no_data"];
+
         if (defectEl) {
-            defectEl.classList.remove('active-defect');
-            if (data.is_defect) {
-                defectEl.classList.add('active-defect');
+            levelKeysCircle.forEach(function(cls){ defectEl.classList.remove(cls); });
+            defectEl.classList.add(data.is_defect ? "status-critical" : "status-green");
+        }
+
+        function updateOverlayLight(circleId, statusId, level, text, tooltip) {
+            var circleEl = document.getElementById(circleId);
+            if (circleEl) {
+                levelKeysCircle.forEach(function(cls){ circleEl.classList.remove(cls); });
+                circleEl.classList.add(levelCircleClass[level] || "status-muted");
+                if (tooltip) {
+                    circleEl.title = tooltip;
+                } else {
+                    circleEl.removeAttribute('title');
+                }
+            }
+            var statusEl = document.getElementById(statusId);
+            if (statusEl) {
+                levelKeysStatus.forEach(function(cls){ statusEl.classList.remove(cls); });
+                statusEl.classList.add(levelStatusClass[level] || "level-no_data");
+                statusEl.textContent = text || "데이터 없음";
             }
         }
+
+        var defectLevel = data.is_defect ? "critical" : "normal";
+        updateOverlayLight(
+            "overlay_light_defect",
+            "overlay_status_defect",
+            defectLevel,
+            defectLevel === "critical" ? "CRITICAL (불량 예측)" : "정상",
+            defectLevel === "critical" ? "불량으로 예측됨" : "정상 동작 중"
+        );
+
+        var alertsByKey = {};
+        if (data.alerts && data.alerts.length) {
+            data.alerts.forEach(function(item){
+                if (item.key) {
+                    alertsByKey[item.key] = item;
+                }
+            });
+        }
+
+        var overlayConfig = {
+            "cast_pressure": {circle: "overlay_light_cast_pressure", status: "overlay_status_cast_pressure"},
+            "upper_mold_temp1": {circle: "overlay_light_upper_mold_temp1", status: "overlay_status_upper_mold_temp1"},
+            "low_section_speed": {circle: "overlay_light_low_section_speed", status: "overlay_status_low_section_speed"},
+            "biscuit_thickness": {circle: "overlay_light_biscuit_thickness", status: "overlay_status_biscuit_thickness"}
+        };
+
+        Object.keys(overlayConfig).forEach(function(key){
+            var cfg = overlayConfig[key];
+            var item = alertsByKey[key];
+            if (item) {
+                var tooltipParts = [];
+                if (typeof item.value === "number") {
+                    tooltipParts.push("최근값: " + item.value.toFixed(2));
+                }
+                if (item.flags && item.flags.length) {
+                    tooltipParts.push(item.flags.join(", "));
+                }
+                var tooltipText = tooltipParts.join("\n");
+                updateOverlayLight(
+                    cfg.circle,
+                    cfg.status,
+                    item.level || "no_data",
+                    item.display || item.level || "",
+                    tooltipText
+                );
+            } else {
+                updateOverlayLight(cfg.circle, cfg.status, "no_data", "데이터 없음", "");
+            }
+        });
     });
     """),
 )
@@ -203,20 +453,133 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         return ui.h1("95.5%", class_="kpi-value")
     
     # 불량 센서 상태 업데이트 (실시간)
+    @reactive.calc
+    def anomaly_summary():
+        summary = {}
+        df = shared_df.get()
+        if df is None:
+            df = pd.DataFrame()
+
+        selected_code = input.mold_code_select()
+        if selected_code is None or selected_code == "":
+            selected_code = "all"
+        selected_code = str(selected_code)
+
+        if selected_code != "all" and "mold_code" in df.columns:
+            df = df[df["mold_code"].astype(str) == selected_code]
+        if df is None or df.empty:
+            return summary
+
+        for var_name, var_label in ALERT_VARIABLES:
+            stats = BASELINE_STATS.get(var_name)
+            default_entry = {
+                "level": "no_data",
+                "display": ALERT_STATUS_TEXT.get("no_data", "데이터 없음"),
+                "latest": None,
+                "median": None,
+                "mad": None,
+                "z": None,
+                "ewma": None,
+                "mad_breach": False,
+                "drift": False,
+                "mean": None,
+                "std": None,
+            }
+            summary[var_name] = default_entry
+            if stats is None or var_name not in df.columns:
+                continue
+
+            series = pd.to_numeric(df[var_name], errors="coerce").dropna()
+            if series.empty:
+                continue
+
+            latest = float(series.iloc[-1])
+            median = stats["median"]
+            mad = stats["mad"]
+            z_score = 0.6745 * (latest - median) / mad if mad else 0.0
+            mad_breach = abs(z_score) > MAD_THRESHOLD
+
+            tracker_key = (selected_code, var_name)
+            tracker = EWMA_TRACKER.get(tracker_key, {"ewma": 0.0, "consec": 0})
+            ewma_val = EWMA_LAMBDA * z_score + (1 - EWMA_LAMBDA) * tracker.get("ewma", 0.0)
+            if not np.isfinite(ewma_val):
+                ewma_val = 0.0
+            ewma_breach = abs(ewma_val) > EWMA_LIMIT
+            consec = tracker.get("consec", 0) + 1 if ewma_breach else 0
+            drift = consec >= EWMA_REQUIRED_RUNS
+            EWMA_TRACKER[tracker_key] = {"ewma": ewma_val, "consec": consec}
+
+            if mad_breach:
+                level = "critical"
+                display_text = "CRITICAL (값 튐)" if not drift else "CRITICAL (즉시 조치)"
+            elif drift:
+                level = "warning"
+                display_text = "WARNING (추세 이상)"
+            else:
+                level = "normal"
+                display_text = "정상"
+
+            mean_val = float(series.mean())
+            if not np.isfinite(mean_val):
+                mean_val = None
+            std_val = float(series.std(ddof=1)) if len(series) > 1 else None
+            if std_val is not None and not np.isfinite(std_val):
+                std_val = None
+
+            summary[var_name] = {
+                "level": level,
+                "display": display_text,
+                "latest": latest,
+                "median": median,
+                "mad": mad,
+                "z": z_score,
+                "ewma": ewma_val,
+                "mad_breach": mad_breach,
+                "drift": drift,
+                "mean": mean_val,
+                "std": std_val,
+            }
+        return summary
+
     @reactive.effect
     def _sensor_update():
         reactive.invalidate_later(500)
         is_defect = defect_indicator() if defect_indicator else False
-        
+
+        alerts_payload = []
+        statuses = anomaly_summary()
+        for var_name, var_label in ALERT_VARIABLES:
+            info = statuses.get(var_name, {})
+            level = info.get("level", "no_data")
+            display_text = info.get("display") or ALERT_STATUS_TEXT.get(level, "데이터 없음")
+            flags = []
+            if info.get("mad_breach"):
+                flags.append("MAD 경보")
+            if info.get("drift"):
+                flags.append("EWMA 경보")
+
+            alerts_payload.append({
+                "name": var_label,
+                "key": var_name,
+                "value": info.get("latest"),
+                "level": level,
+                "display": display_text,
+                "mean": info.get("mean"),
+                "std": info.get("std"),
+                "flags": flags,
+                "details": ", ".join(flags),
+            })
+
         # Shiny 메시지로 JavaScript에 전달
         session.send_custom_message("update_sensors", {
-            "is_defect": is_defect
+            "is_defect": is_defect,
+            "alerts": alerts_payload,
         })
 
     @output
     @render.ui
     def kpi_cycle():
-        df = shared_df()
+        df = shared_df.get()
         if df.empty or 'production_cycletime' not in df.columns:
             return ui.h1("0.0 sec", class_="kpi-value")
         return ui.h1(f"{df['production_cycletime'].mean():.1f} sec", class_="kpi-value")
@@ -224,7 +587,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
     @output
     @render.ui
     def kpi_uptime():
-        df = shared_df()
+        df = shared_df.get()
         if df.empty or 'working' not in df.columns:
             return ui.h1("0.0%", class_="kpi-value")
         working = (df['working'] == '가동').sum()
@@ -316,7 +679,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
     @output
     @render.ui
     def run_charts_container():
-        df = shared_df()
+        df = shared_df.get()
         mold_code = input.mold_code_select()
         variables = input.variable_select()
         
@@ -345,7 +708,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         if not variables:
             return
         
-        df = shared_df()
+        df = shared_df.get()
         mold_code = input.mold_code_select()
         
         for var in variables:
@@ -356,7 +719,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
                 @output(id=chart_id)
                 @render.plot
                 def _():
-                    return create_single_chart(shared_df(), input.mold_code_select(), variable)
+                    return create_single_chart(shared_df.get(), input.mold_code_select(), variable)
                 return _
             
             make_renderer(var)
@@ -364,7 +727,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
     @output
     @render.data_frame
     def tab1_table_realtime():
-        df = shared_df()
+        df = shared_df.get()
         
         if df.empty:
             return render.DataGrid(
