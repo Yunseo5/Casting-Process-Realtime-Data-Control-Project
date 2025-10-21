@@ -194,7 +194,7 @@ tab_ui = ui.page_fluid(
     """),
 )
 
-# SERVER
+## SERVER
 def tab_server(input, output, session, streamer, shared_df, streaming_active, defect_indicator=None, anomaly_indicator=None):
     
     @output

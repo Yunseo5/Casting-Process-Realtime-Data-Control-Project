@@ -8,7 +8,7 @@ from modules.tab_target_qc_team import tab_ui as qc_ui, tab_server as qc_server
 from modules.tab_target_ai_engineer import tab_ui as ai_ui, tab_server as ai_server
 from modules.tab_target_log_accumulation import tab_ui as log_ui, tab_server as log_server
 
-# -------------------------------------------------------------
+## -------------------------------------------------------------
 # 탭 정의
 # -------------------------------------------------------------
 TAB_DEFINITIONS = [
