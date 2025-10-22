@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from shiny import reactive, render, ui
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
+from scipy.stats import entropy, ks_2samp, wasserstein_distance
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 PREDICTIONS_FILE = BASE_DIR / "data" / "intermin" / "test_predictions_v2.csv"
@@ -32,6 +33,11 @@ PI_TOP_FEATURES = pd.DataFrame({"feature": [
     "high_section_speed",
     "upper_mold_temp1",
 ]})
+CHOICE_ITEMS = {
+    "train": "학습 데이터",
+    "highlight": "F1-score 낮은 데이터",
+    "non_highlight": "F1-score 높은 데이터",
+}
 
 
 
@@ -98,6 +104,56 @@ def _apply_feature_filters(values: pd.Series, feature: str) -> pd.Series:
     if "max" in rule:
         filtered = filtered[filtered <= rule["max"]]
     return filtered
+
+
+def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
+    m = 0.5 * (p + q)
+    safe_p = np.where(p == 0, 1e-12, p)
+    safe_q = np.where(q == 0, 1e-12, q)
+    safe_m = np.where(m == 0, 1e-12, m)
+    return float(0.5 * (entropy(safe_p, safe_m) + entropy(safe_q, safe_m)))
+
+
+def _compute_divergence_metrics(
+    values_a: np.ndarray | pd.Series,
+    values_b: np.ndarray | pd.Series,
+    kind: str,
+    bin_edges: np.ndarray | None = None,
+) -> dict[str, float]:
+    metrics = {"ks": np.nan, "ks_p": np.nan, "js": np.nan, "wasserstein": np.nan}
+    if values_a is None or values_b is None:
+        return metrics
+    a = np.asarray(values_a)
+    b = np.asarray(values_b)
+    if a.size == 0 or b.size == 0:
+        return metrics
+    if kind == "numeric":
+        ks_stat, ks_p = ks_2samp(a, b, alternative="two-sided", mode="asymp")
+        metrics["ks"] = float(ks_stat)
+        metrics["ks_p"] = float(ks_p)
+        metrics["wasserstein"] = float(wasserstein_distance(a, b))
+        if bin_edges is None:
+            min_val = float(np.nanmin(np.concatenate([a, b])))
+            max_val = float(np.nanmax(np.concatenate([a, b])))
+            bin_edges = np.linspace(min_val, max_val, 50)
+        hist_a, _ = np.histogram(a, bins=bin_edges, density=False)
+        hist_b, _ = np.histogram(b, bins=bin_edges, density=False)
+        if hist_a.sum() > 0 and hist_b.sum() > 0:
+            p = hist_a.astype(float) / hist_a.sum()
+            q = hist_b.astype(float) / hist_b.sum()
+            metrics["js"] = _js_divergence(p, q)
+        return metrics
+    # categorical
+    categories = sorted(set(map(str, a)) | set(map(str, b)))
+    if not categories:
+        return metrics
+    counts_a = pd.Series(map(str, a)).value_counts()
+    counts_b = pd.Series(map(str, b)).value_counts()
+    p = np.array([counts_a.get(cat, 0.0) for cat in categories], dtype=float)
+    q = np.array([counts_b.get(cat, 0.0) for cat in categories], dtype=float)
+    if p.sum() > 0 and q.sum() > 0:
+        metrics["js"] = _js_divergence(p / p.sum(), q / q.sum())
+    return metrics
 
 
 def _segment_f1(df: pd.DataFrame) -> pd.DataFrame:
@@ -192,7 +248,7 @@ tab_ui = ui.page_fluid(
         right_column,
         col_widths=[9, 3],
         class_="align-items-stretch",
-    )
+    ),
 )
 
 
@@ -568,35 +624,23 @@ def tab_server(input, output, session):
             ax.text(0.5, 0.5, "분포를 표시할 데이터가 없습니다.", ha="center", va="center", fontsize=11)
             return fig
 
-        feature_names = [
-            str(name)
-            for name in PI_TOP_FEATURES["feature"].astype(str).tolist()
-            if name in TRAIN_DATASET.columns
-        ][:5]
-
-        if not feature_names:
-            fig, ax = plt.subplots(figsize=(7.0, 3.2))
-            ax.set_axis_off()
-            ax.text(0.5, 0.5, "표시할 특징이 없습니다.", ha="center", va="center", fontsize=11)
-            return fig
-
-        rows = len(feature_names)
-        fig_height = 9.5 * rows if rows > 1 else 10.2
-        fig, axes = plt.subplots(rows, 1, figsize=(10.2, fig_height), squeeze=False)
-        axes = axes.flatten()
-
-        highlight_rows = _highlighted_prediction_rows()
-        non_highlight_rows = _non_highlighted_prediction_rows()
         try:
-            selected = input.distribution_datasets()
+            selected_keys = [
+                input.distribution_primary(),
+                input.distribution_secondary(),
+            ]
         except Exception:
-            selected = None
-        selected_set = set(selected or ["train", "highlight", "non_highlight"])
-        if not selected_set:
-            fig, ax = plt.subplots(figsize=(7.0, 3.2))
-            ax.set_axis_off()
-            ax.text(0.5, 0.5, "표시할 데이터가 없습니다.", ha="center", va="center", fontsize=11)
-            return fig
+            selected_keys = []
+        selected_keys = [key for key in selected_keys if key in CHOICE_ITEMS]
+        if not selected_keys:
+            selected_keys = ["train"]
+        ordered_keys = []
+        seen_keys: set[str] = set()
+        for key in selected_keys:
+            if key not in seen_keys:
+                ordered_keys.append(key)
+                seen_keys.add(key)
+        selected_set = set(ordered_keys)
 
         feature_names = [
             str(name)
@@ -606,19 +650,23 @@ def tab_server(input, output, session):
 
         rows = len(feature_names)
         fig_height = 9.5 * rows if rows > 1 else 10.2
-        fig, axes = plt.subplots(rows, 1, figsize=(10.2, fig_height), squeeze=False)
-        axes = axes.flatten()
+        fig, axes = plt.subplots(rows, 2, figsize=(12.6, fig_height), squeeze=False)
+        axes = np.asarray(axes)
 
         highlight_rows = _highlighted_prediction_rows()
         non_highlight_rows = _non_highlighted_prediction_rows()
         highlight_rows = highlight_rows.reindex(columns=TRAIN_DATASET.columns, fill_value=pd.NA)
         non_highlight_rows = non_highlight_rows.reindex(columns=TRAIN_DATASET.columns, fill_value=pd.NA)
 
-        for idx, (ax, feature) in enumerate(zip(axes, feature_names), start=1):
+        for idx, feature in enumerate(feature_names):
+            hist_ax = axes[idx, 0]
+            table_ax = axes[idx, 1]
             series = TRAIN_DATASET[feature].dropna()
             if series.empty:
-                ax.set_axis_off()
-                ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                hist_ax.set_axis_off()
+                hist_ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                table_ax.set_axis_off()
+                table_ax.text(0.5, 0.5, "지표 계산 불가", ha="center", va="center", fontsize=9)
                 continue
 
             highlight_series = (
@@ -634,13 +682,14 @@ def tab_server(input, output, session):
 
             plotted = False
             peak = 0.0
+            bin_edges_for_metrics: np.ndarray | None = None
+            samples: dict[str, np.ndarray] = {}
 
             if pd.api.types.is_numeric_dtype(series):
                 data_entries: list[dict[str, object]] = []
 
                 if "train" in selected_set:
-                    baseline_values = pd.to_numeric(series, errors="coerce").dropna()
-                    baseline_values = _apply_feature_filters(baseline_values, feature)
+                    baseline_values = _apply_feature_filters(pd.to_numeric(series, errors="coerce").dropna(), feature)
                     if not baseline_values.empty:
                         data_entries.append({
                             "key": "train",
@@ -649,60 +698,64 @@ def tab_server(input, output, session):
                             "alpha": 0.55,
                             "label": "학습 데이터",
                             "line_color": "#2f3e46",
-                            "line_label": "학습 평균",
+                            "line_label": "학습 데이터 평균",
                         })
+                        samples["train"] = baseline_values.to_numpy(dtype=float)
 
                 if "highlight" in selected_set:
-                    highlight_values = pd.to_numeric(highlight_series, errors="coerce").dropna()
-                    highlight_values = _apply_feature_filters(highlight_values, feature)
+                    highlight_values = _apply_feature_filters(pd.to_numeric(highlight_series, errors="coerce").dropna(), feature)
                     if not highlight_values.empty:
                         data_entries.append({
                             "key": "highlight",
                             "values": highlight_values,
                             "color": "#a41623",
                             "alpha": 0.7,
-                            "label": "하이라이트 데이터",
+                            "label": "F1-score 낮은 데이터",
                             "line_color": "#a41623",
-                            "line_label": "하이라이트 평균",
+                            "line_label": "F1-score 낮은 데이터 평균",
                         })
+                        samples["highlight"] = highlight_values.to_numpy(dtype=float)
 
                 if "non_highlight" in selected_set:
-                    normal_values = pd.to_numeric(non_highlight_series, errors="coerce").dropna()
-                    normal_values = _apply_feature_filters(normal_values, feature)
+                    normal_values = _apply_feature_filters(pd.to_numeric(non_highlight_series, errors="coerce").dropna(), feature)
                     if not normal_values.empty:
                         data_entries.append({
                             "key": "non_highlight",
                             "values": normal_values,
                             "color": "#918450",
                             "alpha": 0.7,
-                            "label": "일반 데이터",
+                            "label": "F1-score 높은 데이터",
                             "line_color": "#918450",
-                            "line_label": "일반 평균",
+                            "line_label": "F1-score 높은 데이터 평균",
                         })
+                        samples["non_highlight"] = normal_values.to_numpy(dtype=float)
 
                 if not data_entries:
-                    ax.set_axis_off()
-                    ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                    hist_ax.set_axis_off()
+                    hist_ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                    table_ax.set_axis_off()
+                    table_ax.text(0.5, 0.5, "지표 계산 불가", ha="center", va="center", fontsize=9)
                     continue
 
                 bin_reference = next((entry["values"] for entry in data_entries if len(entry["values"]) > 0), None)
                 if bin_reference is None:
-                    ax.set_axis_off()
-                    ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                    hist_ax.set_axis_off()
+                    hist_ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                    table_ax.set_axis_off()
+                    table_ax.text(0.5, 0.5, "지표 계산 불가", ha="center", va="center", fontsize=9)
                     continue
 
                 bin_reference = pd.Series(bin_reference, dtype=float)
                 bins = max(5, min(80, int(np.sqrt(len(bin_reference))) * 4))
-                weights = None
-                bin_edges = None
+                bin_edges_for_metrics = None
 
                 for entry in data_entries:
                     values = pd.Series(entry["values"], dtype=float).dropna()
                     if values.empty:
                         continue
                     weights = np.full(len(values), 100.0 / len(values))
-                    if bin_edges is None:
-                        counts, bin_edges, _ = ax.hist(
+                    if bin_edges_for_metrics is None:
+                        counts, bin_edges_for_metrics, _ = hist_ax.hist(
                             values,
                             bins=bins,
                             weights=weights,
@@ -712,9 +765,9 @@ def tab_server(input, output, session):
                             label=entry["label"],
                         )
                     else:
-                        counts, _, _ = ax.hist(
+                        counts, _, _ = hist_ax.hist(
                             values,
-                            bins=bin_edges,
+                            bins=bin_edges_for_metrics,
                             weights=weights,
                             color=entry["color"],
                             alpha=entry["alpha"],
@@ -724,7 +777,7 @@ def tab_server(input, output, session):
                     if counts.size:
                         peak = max(peak, float(np.max(counts)))
                     mean_value = float(values.mean())
-                    ax.axvline(
+                    hist_ax.axvline(
                         mean_value,
                         color=entry["line_color"],
                         linestyle="--",
@@ -733,29 +786,30 @@ def tab_server(input, output, session):
                     )
                     plotted = True
 
-                ax.set_ylabel("비율 (%)")
-
+                hist_ax.set_ylabel("비율 (%)")
             else:
                 dataset_counts: list[tuple[str, pd.Series, str]] = []
-
                 if "train" in selected_set:
                     baseline_counts = series.astype(str).value_counts(normalize=True) * 100.0
                     if not baseline_counts.empty:
                         dataset_counts.append(("학습 데이터", baseline_counts, "#2f3e46"))
-
+                        samples["train"] = series.astype(str).to_numpy()
                 if "highlight" in selected_set:
                     highlight_counts = highlight_series.astype(str).value_counts(normalize=True) * 100.0
                     if not highlight_counts.empty:
-                        dataset_counts.append(("하이라이트 데이터", highlight_counts, "#a41623"))
-
+                        dataset_counts.append(("F1-score 낮은 데이터", highlight_counts, "#a41623"))
+                        samples["highlight"] = highlight_series.astype(str).to_numpy()
                 if "non_highlight" in selected_set:
                     normal_counts = non_highlight_series.astype(str).value_counts(normalize=True) * 100.0
                     if not normal_counts.empty:
-                        dataset_counts.append(("일반 데이터", normal_counts, "#918450"))
+                        dataset_counts.append(("F1-score 높은 데이터", normal_counts, "#918450"))
+                        samples["non_highlight"] = normal_counts.astype(str).to_numpy()
 
                 if not dataset_counts:
-                    ax.set_axis_off()
-                    ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                    hist_ax.set_axis_off()
+                    hist_ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center", fontsize=10)
+                    table_ax.set_axis_off()
+                    table_ax.text(0.5, 0.5, "지표 계산 불가", ha="center", va="center", fontsize=9)
                     continue
 
                 order_source = dataset_counts[0][1].sort_values(ascending=False)
@@ -783,7 +837,7 @@ def tab_server(input, output, session):
 
                 for idx_shift, (label, aligned, color) in enumerate(base_vals_list):
                     shift = offset_start + idx_shift * width
-                    ax.bar(
+                    hist_ax.bar(
                         x + shift,
                         aligned.values,
                         width=width,
@@ -792,31 +846,67 @@ def tab_server(input, output, session):
                         label=label,
                     )
 
-                ax.set_xticks(x)
-                ax.set_xticklabels(top_categories, rotation=30, ha="right")
-                ax.set_ylabel("비율 (%)")
+                hist_ax.set_xticks(x)
+                hist_ax.set_xticklabels(top_categories, rotation=30, ha="right")
+                hist_ax.set_ylabel("비율 (%)")
 
             peak = max(5.0, peak)
-            ax.set_ylim(0, peak * 1.2)
-            ax.margins(x=0.02, y=0.0)
-            ax.yaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
-            ax.yaxis.set_minor_locator(MaxNLocator(nbins=16, integer=True))
-            ax.tick_params(axis="y", which="major", length=6)
-            ax.tick_params(axis="y", which="minor", length=3)
-
+            hist_ax.set_ylim(0, peak * 1.2)
+            hist_ax.margins(x=0.02, y=0.0)
+            hist_ax.yaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
+            hist_ax.yaxis.set_minor_locator(MaxNLocator(nbins=16, integer=True))
+            hist_ax.tick_params(axis="y", which="major", length=6)
+            hist_ax.tick_params(axis="y", which="minor", length=3)
             if plotted:
-                ax.legend(loc="upper right")
+                hist_ax.legend(loc="upper left")
+            hist_ax.set_title(f"{idx + 1}. {feature}", fontsize=11, loc="left")
+            hist_ax.grid(alpha=0.25)
 
-            ax.set_title(f"{idx}. {feature}", fontsize=11, loc="left")
-            ax.grid(alpha=0.25)
+            table_ax.set_axis_off()
+            metrics_rows = [
+                ["KS 통계량", "-"],
+                ["KS p-value", "-"],
+                ["JS Divergence", "-"],
+                ["Wasserstein", "-"],
+            ]
+            pair_keys = [key for key in ordered_keys if key in samples]
+            if len(pair_keys) >= 2:
+                key_a, key_b = pair_keys[:2]
+                kind = "numeric" if pd.api.types.is_numeric_dtype(series) else "categorical"
+                metrics = _compute_divergence_metrics(
+                    samples.get(key_a), samples.get(key_b), kind, bin_edges=bin_edges_for_metrics
+                )
+                metric_map = {
+                    "KS 통계량": metrics["ks"],
+                    "KS p-value": metrics["ks_p"],
+                    "JS Divergence": metrics["js"],
+                    "Wasserstein": metrics["wasserstein"],
+                }
+                for row in metrics_rows:
+                    value = metric_map[row[0]]
+                    row[1] = f"{value:.3f}" if np.isfinite(value) else "-"
+            table_ax.cla()
+            table_ax.set_xlim(0, 1)
+            table_ax.set_ylim(0, len(metrics_rows) + 1)
+            for ridx, (label, value) in enumerate(metrics_rows, start=1):
+                y = len(metrics_rows) + 1 - ridx
+                table_ax.text(0.05, y, label, va="center", ha="left", fontsize=10)
+                table_ax.text(0.8, y, value, va="center", ha="right", fontsize=10, fontweight="bold")
+                table_ax.hlines(y - 0.5, 0.0, 1.0, colors="#dddddd", linewidth=0.8)
+            table_ax.hlines(len(metrics_rows) + 0.5, 0.0, 1.0, colors="#bbbbbb", linewidth=1.0)
+            table_ax.set_xticks([])
+            table_ax.set_yticks([])
+            table_ax.set_title("분포 지표", fontsize=10, loc="left")
+            table_ax.set_frame_on(False)
 
-        for ax in axes[len(feature_names):]:
-            ax.set_axis_off()
+        for idx in range(len(feature_names), axes.shape[0]):
+            axes[idx, 0].set_axis_off()
+            axes[idx, 1].set_axis_off()
 
         if len(feature_names) > 1:
-            fig.subplots_adjust(top=0.95, bottom=0.06, left=0.08, right=0.97, hspace=1.6)
+            fig.subplots_adjust(top=0.95, bottom=0.06, left=0.06, right=0.96, hspace=1.5, wspace=0.4)
         else:
-            fig.subplots_adjust(top=0.92, bottom=0.12, left=0.08, right=0.97)
+            fig.subplots_adjust(top=0.92, bottom=0.12, left=0.08, right=0.95, wspace=0.4)
         return fig
 
     @reactive.effect
@@ -826,16 +916,25 @@ def tab_server(input, output, session):
             body = ui.p("표시할 데이터가 없습니다.", class_="text-muted")
         else:
             body = ui.div(
-                ui.input_checkbox_group(
-                    "distribution_datasets",
-                    None,
-                    choices={
-                        "train": "학습 데이터",
-                        "highlight": "F1-score 낮은 데이터",
-                        "non_highlight": "F1-score 높은 데이터",
-                    },
-                    selected=["train", "highlight"],
-                    inline=True,
+                ui.div(
+                    ui.div(
+                        ui.input_select(
+                            "distribution_primary",
+                            "분포 1",
+                            choices=CHOICE_ITEMS,
+                            selected="train",
+                        ),
+                        class_="me-2",
+                    ),
+                    ui.div(
+                        ui.input_select(
+                            "distribution_secondary",
+                            "분포 2",
+                            choices=CHOICE_ITEMS,
+                            selected="highlight",
+                        ),
+                    ),
+                    class_="d-flex align-items-end",
                 ),
                 ui.output_plot("distribution_plot", height="1200px"),
             )
