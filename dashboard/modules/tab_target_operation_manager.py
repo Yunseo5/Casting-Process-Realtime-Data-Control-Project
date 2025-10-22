@@ -44,7 +44,7 @@ VARIABLES = {
     "EMS_operation_time": "EMS 작동 시간 (EMS_operation_time)"
 }
 
-# 기본 선택 변수 (처음 3개)
+# 기본 선택 변수
 DEFAULT_VARIABLES = ["molten_temp", "facility_operation_cycleTime", "production_cycletime"]
 
 ALERT_VARIABLES = [
@@ -80,6 +80,8 @@ LEVEL_STATUS_CLASS = {
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 BASELINE_FILE = BASE_DIR / "data" / "processed" / "train_v1_time.csv"
+# ★ test 예측파일(라벨 포함) 경로 - 선적재는 하지 않고, 실시간 매칭에만 사용
+TEST_PRED_FILE = BASE_DIR / "data" / "intermin" / "test_predictions_v2.csv"
 
 MAD_THRESHOLD = 2.5
 EWMA_LAMBDA = 0.3
@@ -88,7 +90,6 @@ EWMA_SIGMA = math.sqrt(EWMA_LAMBDA / (2 - EWMA_LAMBDA)) if 0 < EWMA_LAMBDA < 1 e
 EWMA_LIMIT = 2 * EWMA_SIGMA
 EWMA_TRACKER = {}
 ANOMALY_MAX_ROWS = 500
-
 
 def load_baseline_stats(path: Path, variables):
     stats = {}
@@ -121,7 +122,6 @@ def load_baseline_stats(path: Path, variables):
             mad = 1.0
         stats[key] = {"median": median, "mad": max(mad, 1e-6)}
     return stats
-
 
 BASELINE_STATS = load_baseline_stats(BASELINE_FILE, ALERT_VARIABLES)
 
@@ -190,12 +190,24 @@ transition:left 0.3s;box-shadow:0 2px 4px rgba(0,0,0,0.2)}
 .toggle-switch.active .toggle-circle{left:20px}
 .fade-in{animation:fadeInEase .35s ease both}
 @keyframes fadeInEase{0%{opacity:0;transform:translateY(6px)}100%{opacity:1;transform:translateY(0)}}
+.var-group{background:#fafbfc;border:1px solid #e6e8eb;border-radius:12px;padding:14px 16px}
+.var-group + .var-group{margin-top:12px}
+.var-group-title{font-weight:700;color:#2A2D30;margin-bottom:10px;font-size:14px}
+.var-group-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:16px}
+@media (max-width:1200px){.var-group-grid{grid-template-columns:repeat(4,1fr)}}
+@media (max-width:992px){.var-group-grid{grid-template-columns:repeat(3,1fr)}}
+@media (max-width:768px){.var-group-grid{grid-template-columns:repeat(2,1fr)}}
 """
 
-# 헬퍼 함수
+# 헬퍼
 def create_kpi(title, output_id, subtitle, line_class):
-    return ui.div(ui.p(title, class_="kpi-title"), ui.div(class_=f"kpi-line {line_class}"),
-                  ui.output_ui(output_id), ui.p(subtitle, class_="kpi-sub"), class_="kpi-card")
+    return ui.div(
+        ui.p(title, class_="kpi-title"),
+        ui.div(class_=f"kpi-line {line_class}"),
+        ui.output_ui(output_id),
+        ui.p(subtitle, class_="kpi-sub"),
+        class_="kpi-card"
+    )
 
 def create_light(output_id, label):
     return ui.div(
@@ -207,19 +219,14 @@ def create_light(output_id, label):
 def get_label(variable):
     return VARIABLES.get(variable, variable).split(' (')[0]
 
-
 def run_charts_container_ui():
-    """Build a static container that toggles chart visibility without re-rendering the DOM."""
     no_selection_panel = ui.panel_conditional(
         "!(input.variable_select && input.variable_select.length)",
         ui.div(
-            ui.p(
-                "변수를 선택하세요",
-                style="text-align:center;padding:40px;color:#999;font-size:16px",
-            )
+            ui.p("변수를 선택하세요",
+                 style="text-align:center;padding:40px;color:#999;font-size:16px")
         ),
     )
-
     chart_panels = [
         ui.panel_conditional(
             f"input.variable_select && input.variable_select.includes('{variable}')",
@@ -230,12 +237,9 @@ def run_charts_container_ui():
         )
         for variable in VARIABLES.keys()
     ]
-
     return ui.div(no_selection_panel, *chart_panels)
 
-
 def overlay_light_row_ui(key: str, label: str):
-    """Create a single overlay row with placeholders for circle and status outputs."""
     return ui.div(
         ui.output_ui(f"overlay_light_circle_{key}"),
         ui.div(
@@ -246,9 +250,7 @@ def overlay_light_row_ui(key: str, label: str):
         class_="overlay-light-row",
     )
 
-
 def overlay_light_grid_static_ui():
-    """Build the static overlay layout so only the inner outputs update over time."""
     rows = [overlay_light_row_ui("defect", "불량 발생")]
     rows.extend(
         overlay_light_row_ui(var_name, var_label)
@@ -256,57 +258,90 @@ def overlay_light_grid_static_ui():
     )
     return ui.div(*rows, class_="overlay-light-grid")
 
-
 # UI
 tab_ui = ui.page_fluid(
     ui.tags.style(STYLES),
     ui.div(
         ui.div(
-            ui.div(ui.layout_columns(
-                create_kpi("금형별 수율", "kpi_yield", "실시간 집계", "red-line"),
-                create_kpi("제품 사이클 타임", "kpi_cycle", "평균 사이클 타임", "yellow-line"),
-                create_kpi("설비 가동률", "kpi_uptime", "현재 가동 상태", "navy-line"),
-                col_widths=[4,4,4]), style="flex:3"),
+            ui.div(
+                ui.layout_columns(
+                    create_kpi("금형별 수율", "kpi_yield", "실시간 집계", "red-line"),
+                    create_kpi("제품 사이클 타임", "kpi_cycle", "평균 사이클 타임", "yellow-line"),
+                    create_kpi("설비 가동률", "kpi_uptime", "현재 가동 상태", "navy-line"),
+                    col_widths=[4, 4, 4]
+                ),
+                style="flex:3"
+            ),
             ui.div(
                 ui.div(
                     create_light("defect_indicator_ui", "불량 발생"),
-                    ui.input_action_button("toggle_defect_overlay", "⚠ 경보 창 띄우기", class_="btn btn-outline-danger btn-sm"),
+                    ui.input_action_button("toggle_defect_overlay", "⚠ 경보 창 띄우기",
+                                           class_="btn btn-outline-danger btn-sm"),
                     class_="status-panel"
                 ),
                 style="flex:1"
             ),
-            style="display:flex;gap:24px;margin-bottom:24px"),
-        ui.div(ui.div("검색 및 설정", class_="card-header-title"),
-               ui.div(ui.p("Mold Code 검색", style="font-weight:600;margin-bottom:12px;margin-top:16px"),
-                      ui.div(id="mold-code-toggles", style="display:grid;grid-template-columns:1fr;gap:16px;margin-bottom:20px")),
-               ui.div(ui.p("변수 설정 (복수 선택 가능)", style="font-weight:600;margin-bottom:12px;margin-top:16px"),
-                      ui.div(id="variable-toggles", style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px")),
-               ui.tags.div(ui.input_radio_buttons("mold_code_select", None, choices=MOLD_CODES, selected="all", inline=False), style="display:none"),
-               ui.tags.div(ui.input_checkbox_group("variable_select", None, choices=VARIABLES, selected=DEFAULT_VARIABLES, inline=False), style="display:none"),
-               class_="custom-card"),
-        ui.div(ui.div("런 차트", class_="card-header-title"),
-               run_charts_container_ui(),
-               class_="custom-card"),
-        ui.div(ui.div("Top 10 로그 (실시간 데이터)", class_="card-header-title"),
-               ui.div(ui.output_data_frame("tab1_table_realtime"), class_="table-container"),
-               class_="custom-card"),
-        class_="main-container"),
+            style="display:flex;gap:24px;margin-bottom:24px"
+        ),
+        ui.div(
+            ui.div("검색 및 설정", class_="card-header-title"),
+            ui.div(
+                ui.p("Mold Code 검색", style="font-weight:600;margin-bottom:12px;margin-top:16px"),
+                ui.div(id="mold-code-toggles",
+                       style="display:grid;grid-template-columns:1fr;gap:16px;margin-bottom:20px")
+            ),
+            ui.div(
+                ui.p("변수 설정 (복수 선택 가능)", style="font-weight:600;margin-bottom:12px;margin-top:16px"),
+                ui.div(id="variable-toggles", style="display:block")
+            ),
+            ui.tags.div(
+                ui.input_radio_buttons("mold_code_select", None, choices=MOLD_CODES,
+                                       selected="all", inline=False),
+                style="display:none"
+            ),
+            ui.tags.div(
+                ui.input_checkbox_group("variable_select", None, choices=VARIABLES,
+                                        selected=DEFAULT_VARIABLES, inline=False),
+                style="display:none"
+            ),
+            class_="custom-card"
+        ),
+        ui.div(
+            ui.div("런 차트", class_="card-header-title"),
+            run_charts_container_ui(),
+            class_="custom-card"
+        ),
+        ui.div(
+            ui.div("Top 10 로그 (실시간 데이터)", class_="card-header-title"),
+            ui.div(ui.output_data_frame("tab1_table_realtime"), class_="table-container"),
+            class_="custom-card"
+        ),
+        class_="main-container"
+    ),
     ui.div(
-        ui.div("불량 경보", ui.tags.button("×", id="close_defect_overlay", class_="overlay-close-btn", **{"aria-label": "닫기"}), class_="overlay-header"),
+        ui.div(
+            "불량 경보",
+            ui.tags.button("×", id="close_defect_overlay", class_="overlay-close-btn",
+                           **{"aria-label": "닫기"}),
+            class_="overlay-header"
+        ),
         overlay_light_grid_static_ui(),
         id="defect-overlay",
         class_="defect-overlay"
     ),
     ui.tags.script("""
     $(document).ready(function(){
+
+      // ====== (A) 경보 오버레이 드래그/토글 ======
       var overlay = $('#defect-overlay');
       var isDragging = false;
       var dragOffset = {x:0,y:0};
+
       $(document).on('click', '#toggle_defect_overlay', function(){
         overlay.toggleClass('visible');
         if (overlay.hasClass('visible')){
           var storedLeft = overlay.data('pos-left');
-          var storedTop = overlay.data('pos-top');
+          var storedTop  = overlay.data('pos-top');
           if (storedLeft){
             overlay.css({left: storedLeft, top: storedTop || '24px', right: 'auto'});
           } else {
@@ -317,18 +352,16 @@ tab_ui = ui.page_fluid(
           isDragging = false;
         }
       });
+
       $(document).on('click', '#close_defect_overlay', function(){
         overlay.removeClass('visible');
         $(document).off('.defectDrag');
         isDragging = false;
       });
+
       $(document).on('mousedown', '#defect-overlay .overlay-header', function(e){
-        if ($(e.target).closest('.overlay-close-btn').length){
-          return;
-        }
-        if (!overlay.hasClass('visible')){
-          return;
-        }
+        if ($(e.target).closest('.overlay-close-btn').length){ return; }
+        if (!overlay.hasClass('visible')){ return; }
         isDragging = true;
         var rect = overlay[0].getBoundingClientRect();
         dragOffset.x = e.clientX - rect.left;
@@ -337,84 +370,433 @@ tab_ui = ui.page_fluid(
         $(document).on('mousemove.defectDrag', function(ev){
           if (!isDragging) return;
           var newLeft = ev.clientX - dragOffset.x;
-          var newTop = ev.clientY - dragOffset.y;
+          var newTop  = ev.clientY - dragOffset.y;
           overlay.css({left: newLeft + 'px', top: newTop + 'px'});
         });
         $(document).on('mouseup.defectDrag', function(){
           if (!isDragging) return;
           isDragging = false;
           overlay.data('pos-left', overlay.css('left'));
-          overlay.data('pos-top', overlay.css('top'));
+          overlay.data('pos-top',  overlay.css('top'));
           $(document).off('.defectDrag');
         });
         e.preventDefault();
       });
+
+      // ====== (B) Mold code 토글 ======
       var codes = ['all', '8412', '8917', '8722', '8413', '8576'];
       var toggleHTML = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px">';
       codes.forEach(function(code, idx){
         if(idx === 0){
           toggleHTML += '</div><div style="display:grid;grid-template-columns:repeat(5,1fr);gap:16px">';
         }
-        toggleHTML += '<div style="text-align:center"><label style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;margin:0"><input type="radio" name="mold_toggle" value="' + code + '" ' + (idx === 0 ? 'checked' : '') + ' style="display:none"><div class="toggle-switch ' + (idx === 0 ? 'active' : '') + '"><div class="toggle-circle"></div></div></label><span style="font-size:11px">' + code + '</span></div>';
+        toggleHTML += ''
+          + '<div style="text-align:center">'
+          +   '<label style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;margin:0">'
+          +     '<input type="radio" name="mold_toggle" value="' + code + '" ' + (idx === 0 ? 'checked' : '') + ' style="display:none">'
+          +     '<div class="toggle-switch ' + (idx === 0 ? 'active' : '') + '"><div class="toggle-circle"></div></div>'
+          +   '</label>'
+          +   '<span style="font-size:11px">' + code + '</span>'
+          + '</div>';
       });
       toggleHTML += '</div>';
       $('#mold-code-toggles').html(toggleHTML);
-      
+
       $(document).on('change', 'input[name="mold_toggle"]', function(){
         var selectedValue = $(this).val();
         Shiny.setInputValue('mold_code_select', selectedValue);
-        
         $('input[name="mold_toggle"]').each(function(){
-          if(this.checked){
-            $(this).closest('label').find('.toggle-switch').addClass('active');
-          } else {
-            $(this).closest('label').find('.toggle-switch').removeClass('active');
-          }
+          $(this).closest('label').find('.toggle-switch').toggleClass('active', this.checked);
         });
       });
 
-      var variables = """ + str(list(VARIABLES.keys())) + """;
-      var variableLabels = """ + str(list(VARIABLES.values())) + """;
+      // ====== (C) 변수 토글: 녹이기/붓기/냉각 ======
+
+      if (!document.getElementById('var-groups-css')){
+        var style = document.createElement('style');
+        style.id = 'var-groups-css';
+        style.textContent = `
+          .var-groups-wrapper{
+            display:grid;
+            grid-template-columns:repeat(3, minmax(0, 1fr));
+            gap:16px;
+            width:100%;
+            box-sizing:border-box;
+            align-items:stretch;
+            grid-auto-rows:1fr;
+          }
+          @media (max-width:1280px){ .var-groups-wrapper{ grid-template-columns:repeat(2, minmax(0, 1fr)) } }
+          @media (max-width:820px){  .var-groups-wrapper{ grid-template-columns:1fr } }
+
+          .var-group{
+            background:#fff;border:1px solid #e6e8eb;border-radius:16px;
+            padding:18px 16px 14px;box-shadow:0 2px 8px rgba(0,0,0,.06);
+            width:100%;max-width:100%;overflow:hidden;box-sizing:border-box;
+            display:flex;flex-direction:column;height:100%;
+          }
+          .var-group + .var-group{ margin-top:0 !important; }
+
+          .var-group-title{
+            font-weight:800;color:#2A2D30;margin-bottom:12px;font-size:16px;flex:0 0 auto;
+          }
+
+          .var-group-grid{
+            display:grid;
+            grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
+            gap:12px 14px;
+            width:100%;
+            box-sizing:border-box;
+            flex:1 1 auto;
+          }
+
+          .var-item{
+            display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+            gap:8px;text-align:center;padding:10px 8px;min-height:105px;border-radius:12px;
+            background:#fafbfc;border:1px solid #f0f2f4;overflow:hidden;
+          }
+
+          .toggle-switch{width:46px;height:28px;border-radius:14px}
+          .toggle-switch .toggle-circle{width:20px;height:20px;top:4px;left:4px}
+          .toggle-switch.active .toggle-circle{left:22px}
+        `;
+        document.head.appendChild(style);
+      }
+
+      var variables       = """ + str(list(VARIABLES.keys())) + """;
+      var variableLabels  = """ + str(list(VARIABLES.values())) + """;
       var defaultSelected = """ + str(DEFAULT_VARIABLES) + """;
-      var variableToggleHTML = '';
-      variables.forEach(function(varKey, idx){
-        var labelText = variableLabels[idx].split(' (')[0];
-        var isDefault = defaultSelected.includes(varKey);
-        variableToggleHTML += '<div style="text-align:center"><label style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;margin:0"><input type="checkbox" name="variable_toggle" value="' + varKey + '" ' + (isDefault ? 'checked' : '') + ' style="display:none"><div class="toggle-switch ' + (isDefault ? 'active' : '') + '"><div class="toggle-circle"></div></div></label><span style="font-size:11px">' + labelText + '</span></div>';
+
+      var labelMap = {};
+      variables.forEach(function(k, idx){ labelMap[k] = (variableLabels[idx]||'').split(' (')[0]; });
+
+      var GROUPS = [
+        { title: '녹이기',
+          keys: ['molten_temp','molten_volume','sleeve_temperature'] },
+        { title: '붓기',
+          keys: ['cast_pressure','low_section_speed','high_section_speed','biscuit_thickness','EMS_operation_time','facility_operation_cycleTime','production_cycletime'] },
+        { title: '냉각',
+          keys: ['upper_mold_temp1','upper_mold_temp2','upper_mold_temp3','lower_mold_temp1','lower_mold_temp2','lower_mold_temp3','Coolant_temperature','physical_strength'] }
+      ];
+
+      var html = '<div class="var-groups-wrapper">';
+      GROUPS.forEach(function(g){
+        html += '<div class="var-group">';
+        html +=   '<div class="var-group-title">' + g.title + '</div>';
+        html +=   '<div class="var-group-grid">';
+        g.keys.forEach(function(varKey){
+          if(!(varKey in labelMap)) return;
+          var isDefault = defaultSelected.includes(varKey);
+          html += ''
+            + '<div class="var-item">'
+            +   '<label style="display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;margin:0">'
+            +     '<input type="checkbox" name="variable_toggle" value="' + varKey + '" ' + (isDefault ? 'checked' : '') + ' style="display:none">'
+            +     '<div class="toggle-switch ' + (isDefault ? 'active' : '') + '"><div class="toggle-circle"></div></div>'
+            +   '</label>'
+            +   '<span class="var-label">' + labelMap[varKey] + '</span>'
+            + '</div>';
+        });
+        html +=   '</div>';
+        html += '</div>';
       });
-      $('#variable-toggles').html(variableToggleHTML);
-      
+      html += '</div>';
+
+      $('#variable-toggles').html(html);
+
+      Shiny.setInputValue('variable_select', defaultSelected);
+
       $(document).on('change', 'input[name="variable_toggle"]', function(){
         var selectedValues = [];
         $('input[name="variable_toggle"]:checked').each(function(){
           selectedValues.push($(this).val());
         });
         Shiny.setInputValue('variable_select', selectedValues);
-        
         $('input[name="variable_toggle"]').each(function(){
-          if(this.checked){
-            $(this).closest('label').find('.toggle-switch').addClass('active');
-          } else {
-            $(this).closest('label').find('.toggle-switch').removeClass('active');
-          }
+          $(this).closest('label').find('.toggle-switch').toggleClass('active', this.checked);
         });
       });
+
     });
     """),
 )
 
-## SERVER
-def tab_server(input, output, session, streamer, shared_df, streaming_active, defect_indicator=None, anomaly_indicator=None):
-    
+from collections import defaultdict
+import hashlib
+
+# =====================
+# ★ 금형별 수율: 선적재 + 실시간 누적
+# =====================
+
+# ✅ 금형별 수율 카운터
+YIELD_CNT = defaultdict(lambda: {"good": 0, "total": 0})
+
+def _row_fingerprint(s: pd.Series) -> str | None:
+    """지문: registration_time, mold_code, count, id 를 우선 결합. 없으면 row 전체를 json으로."""
+    if s is None or s.empty:
+        return None
+    keys = [k for k in ["registration_time", "mold_code", "count", "id"] if k in s.index]
+    payload = "|".join(str(s[k]) for k in keys) if keys else s.to_json()
+    try:
+        return hashlib.md5(payload.encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+def _add_outcome(mold_code: str, outcome: int | None):
+    if outcome is None:
+        return
+    YIELD_CNT[mold_code]["total"] += 1
+    if outcome == 0:  # 정상
+        YIELD_CNT[mold_code]["good"] += 1
+    # 전체(all) 동시 집계
+    YIELD_CNT["all"]["total"] += 1
+    if outcome == 0:
+        YIELD_CNT["all"]["good"] += 1
+
+def initialize_yield_from_train():
+    """train_v1_time.csv 의 passorfail 로 선적재(8413/8576은 train에 없으니 0에서 시작)."""
+    try:
+        df = pd.read_csv(BASELINE_FILE)
+        if "mold_code" not in df.columns or "passorfail" not in df.columns:
+            print("[초기화 경고] train에 mold_code/passorfail 없음")
+            return
+        df = df[["mold_code", "passorfail"]].copy()
+        df["passorfail"] = pd.to_numeric(df["passorfail"], errors="coerce")
+        df = df.dropna(subset=["passorfail"])
+        df["passorfail"] = df["passorfail"].astype(int)
+
+        for code, sub in df.groupby("mold_code"):
+            code = str(code)
+            total = len(sub)
+            good  = int((sub["passorfail"] == 0).sum())
+            YIELD_CNT[code]["total"] += total
+            YIELD_CNT[code]["good"]  += good
+            YIELD_CNT["all"]["total"] += total
+            YIELD_CNT["all"]["good"]  += good
+
+        print(f"[초기 수율 적재 완료] 금형 수: {len([k for k in YIELD_CNT if k!='all'])}, 전체: {YIELD_CNT['all']}")
+    except Exception as e:
+        print(f"[초기 수율 적재 실패] {e}")
+
+initialize_yield_from_train()
+
+# ✅ test_predictions_v1.csv 의 passorfail 매핑(선적재 X, 실시간 매칭에만 사용)
+TEST_LABEL_MAP: dict[str, int] = {}
+def _load_test_label_map():
+    global TEST_LABEL_MAP
+    TEST_LABEL_MAP = {}
+    try:
+        if not TEST_PRED_FILE.exists():
+            print(f"[test 라벨] 파일 없음: {TEST_PRED_FILE}")
+            return
+        tdf = pd.read_csv(TEST_PRED_FILE)
+        # 지문 생성에 필요한 주요 키가 없을 수 있으므로, 있는 컬럼만 사용
+        for _, r in tdf.iterrows():
+            try:
+                fp = _row_fingerprint(r)
+                if not fp:
+                    continue
+                pf = pd.to_numeric(r.get("passorfail", np.nan), errors="coerce")
+                if not np.isfinite(pf):
+                    continue
+                TEST_LABEL_MAP[fp] = int(pf)  # 0/1
+            except Exception:
+                continue
+        print(f"[test 라벨] 매핑 준비 완료: {len(TEST_LABEL_MAP)} rows")
+    except Exception as e:
+        print(f"[test 라벨] 로드 실패: {e}")
+
+_load_test_label_map()
+
+# ✅ 서버
+def tab_server(
+    input, output, session,
+    streamer, shared_df, streaming_active,
+    defect_indicator=None,              # 프레임 전역 경보(ALL용)
+    anomaly_indicator=None,
+    predict_row=None,                   # 행 단위 예측 함수
+    pred_col=None,                      # 0/1 라벨 칼럼
+    proba_col=None,                     # 확률 칼럼
+    proba_thresh: float = 0.5,          # 임계값
+    predict_latest_for_code=None,       # [신규] 코드별 최신 예측 함수
+):
+
+    _last_rows = {"n": 0, "last_fp": None}
+    yield_tick = reactive.Value(0)
+    # 모델 경보 전용 트리거: 선택 코드 새 데이터일 때만 증가
+    alert_tick = reactive.Value(0)
+
+    @reactive.effect
+    @reactive.event(shared_df)
+    def _accumulate_yield_realtime():
+        df = shared_df.get()
+        if df is None or df.empty or "mold_code" not in df.columns:
+            print("[YIELD RT] 데이터 없음 또는 mold_code 없음")
+            return
+
+        if "registration_time" in df.columns:
+            df = df.sort_values("registration_time")
+
+        n = len(df)
+        cur_fp = _row_fingerprint(df.iloc[-1]) if n > 0 else None
+        is_new = (n > _last_rows.get("n", 0)) or (cur_fp and cur_fp != _last_rows.get("last_fp"))
+
+        start = _last_rows.get("n", 0)
+        if n > start:
+            new_chunk = df.iloc[start:n]
+        else:
+            new_chunk = df.tail(1) if is_new else pd.DataFrame()
+
+        for _, row in new_chunk.iterrows():
+            mcode = str(row.get("mold_code", "unknown"))
+            outcome = None
+
+            # --- (1) test_predictions_v1.csv 라벨 매칭이 최우선 ---
+            try:
+                fp = _row_fingerprint(row)
+                if fp and fp in TEST_LABEL_MAP:
+                    outcome = int(TEST_LABEL_MAP[fp])  # 0(정상)/1(불량)
+            except Exception:
+                pass
+
+            # --- (2) 매칭 실패 시, 기존 우선순위로 모델 예측값 사용 ---
+            if outcome is None and "passorfail" in row.index and pd.notna(row["passorfail"]):
+                try:
+                    v = int(pd.to_numeric(row["passorfail"], errors="coerce"))
+                    if v in (0, 1):
+                        outcome = v
+                except:
+                    pass
+
+            if outcome is None and pred_col and (pred_col in row.index):
+                try:
+                    pv = pd.to_numeric(row[pred_col], errors="coerce")
+                    if np.isfinite(pv):
+                        outcome = int(pv) if pv in (0, 1) else int(float(pv) >= float(proba_thresh))
+                except:
+                    pass
+
+            if outcome is None and proba_col and (proba_col in row.index):
+                try:
+                    prob = float(pd.to_numeric(row[proba_col], errors="coerce"))
+                    if np.isfinite(prob):
+                        outcome = int(prob >= float(proba_thresh))
+                except:
+                    pass
+
+            if outcome is None and callable(predict_row):
+                try:
+                    pr = predict_row(row)
+                    if isinstance(pr, dict):
+                        if "is_defect" in pr:
+                            outcome = 1 if bool(pr["is_defect"]) else 0
+                        elif "prob" in pr:
+                            outcome = 1 if float(pr["prob"]) >= float(proba_thresh) else 0
+                    elif isinstance(pr, (int, np.integer, float, np.floating)):
+                        outcome = 1 if float(pr) >= float(proba_thresh) else 0
+                    else:
+                        outcome = 1 if bool(pr) else 0
+                except:
+                    pass
+
+            if outcome is None and defect_indicator is not None:
+                try:
+                    raw = defect_indicator()
+                    is_defect = bool(raw.get("is_defect", False)) if isinstance(raw, dict) else bool(raw)
+                    outcome = 1 if is_defect else 0
+                except:
+                    pass
+
+            # --- (3) 누적 집계 ---
+            _add_outcome(mcode, outcome)
+
+        _last_rows["n"] = n
+        _last_rows["last_fp"] = cur_fp
+
+        if not new_chunk.empty or is_new:
+            # KPI는 항상 갱신
+            yield_tick.set(yield_tick.get() + 1)
+
+            # 선택 코드 새 데이터가 있으면 모델 경보만 갱신
+            try:
+                selected_code = str(input.mold_code_select() or "all")
+            except Exception:
+                selected_code = "all"
+            should_update_alert = False
+            if selected_code == "all":
+                should_update_alert = True
+            else:
+                if not new_chunk.empty and "mold_code" in new_chunk.columns:
+                    should_update_alert = any(
+                        str(mc) == selected_code for mc in new_chunk["mold_code"].astype(str)
+                    )
+                elif is_new and "mold_code" in df.columns:
+                    last_mc = df.iloc[-1].get("mold_code", None)
+                    last_mc = str(last_mc) if last_mc is not None and pd.notna(last_mc) else None
+                    should_update_alert = (last_mc == selected_code)
+
+            if should_update_alert:
+                alert_tick.set(alert_tick.get() + 1)
+
+    # KPI
     @output
     @render.ui
     def kpi_yield():
-        return ui.h1("95.5%", class_="kpi-value")
+        _ = yield_tick.get()
+        code = str(input.mold_code_select() or "all")
+        rate = 0.0
+        label = "전체" if code == "all" else f"Mold {code}"
+        stats = YIELD_CNT.get(code, {"good": 0, "total": 0})
+        total = stats["total"]
+        good = stats["good"]
+        if total > 0:
+            rate = (good / total) * 100.0
+        return ui.h1(f"{label}: {rate:.1f}%", class_="kpi-value")
+
+    @output
+    @render.ui
+    def kpi_cycle():
+        df = shared_df.get()
+        if df is None or df.empty or 'production_cycletime' not in df.columns:
+            return ui.h1("0.0 sec", class_="kpi-value")
+        try:
+            return ui.h1(f"{pd.to_numeric(df['production_cycletime'], errors='coerce').dropna().mean():.1f} sec", class_="kpi-value")
+        except Exception:
+            return ui.h1("0.0 sec", class_="kpi-value")
+
+    @output
+    @render.ui
+    def kpi_uptime():
+        df = shared_df.get()
+        # 기본 유효성 체크
+        if (
+            df is None or df.empty or
+            'facility_operation_cycleTime' not in df.columns or
+            'production_cycletime' not in df.columns
+        ):
+            return ui.h1("0.0%", class_="kpi-value")
     
-    # 불량 센서 상태 업데이트 (실시간)
+        # 선택된 몰드코드로 필터 (all이면 전체)
+        selected_code = str(input.mold_code_select() or "all")
+        if selected_code != "all" and 'mold_code' in df.columns:
+            df = df[df['mold_code'].astype(str) == selected_code]
+    
+        if df is None or df.empty:
+            return ui.h1("0.0%", class_="kpi-value")
+    
+        # 0 나누기 방지
+        prod_time = pd.to_numeric(df["production_cycletime"], errors="coerce").replace(0, np.nan)
+        up = pd.to_numeric(df["facility_operation_cycleTime"], errors="coerce")
+    
+        ratio = prod_time / up
+        uptime = np.nanmean(ratio) * 100
+        if not np.isfinite(uptime):
+            uptime = 0.0
+    
+        label = "전체" if selected_code == "all" else f"Mold {selected_code}"
+        return ui.h1(f"{label}: {uptime:.1f}%", class_="kpi-value")
+
+    # === (A) 이상치 경보: 기존 로직 (shared_df 갱신마다 재계산; 선택 코드로 필터만) ===
     @reactive.calc
     def anomaly_summary():
-        summary = {}
         df = shared_df.get()
         if df is None:
             df = pd.DataFrame()
@@ -427,7 +809,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         if selected_code != "all" and "mold_code" in df.columns:
             df = df[df["mold_code"].astype(str) == selected_code]
         if df is None or df.empty:
-            return summary
+            return {}
 
         if 0 < ANOMALY_MAX_ROWS < len(df):
             df = df.tail(ANOMALY_MAX_ROWS).copy()
@@ -437,6 +819,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         if available_keys:
             numeric_df = df[available_keys].apply(pd.to_numeric, errors="coerce")
 
+        summary = {}
         for var_name, var_label in ALERT_VARIABLES:
             stats = BASELINE_STATS.get(var_name)
             default_entry = {
@@ -508,56 +891,123 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
             }
         return summary
 
+    # === (B) 모델 불량 경보: 선택 코드 새 데이터(alert_tick)일 때만 재계산 ===
     @reactive.calc
     def defect_state():
-        state = {
-            "level": "no_data",
-            "text": ALERT_STATUS_TEXT.get("no_data", "데이터 없음"),
-            "tooltip": None,
-        }
+        _ = alert_tick.get()  # 선택 코드 관련 새 데이터가 들어올 때만 갱신
+
+        def _state(level, text, tooltip):
+            return {"level": level, "text": text, "tooltip": tooltip}
+
         df = shared_df.get()
         if df is None or df.empty:
-            return state
+            return _state("no_data", ALERT_STATUS_TEXT.get("no_data", "데이터 없음"), None)
 
-        is_defect = False
-        level = "normal"
-        text = "정상"
-        tooltip = "정상 동작 중"
+        selected_code = input.mold_code_select()
+        if not selected_code:
+            selected_code = "all"
+        selected_code = str(selected_code)
 
-        if defect_indicator:
+        # ALL: 전역 프레임 신호 그대로
+        if selected_code == "all":
+            if defect_indicator is None:
+                return _state("normal", "정상", "정상 동작 중")
             raw = defect_indicator()
             if isinstance(raw, dict):
                 is_defect = bool(raw.get("is_defect", False))
                 level = raw.get("level") or ("critical" if is_defect else "normal")
-                text = raw.get("text") or ("CRITICAL (불량 예측)" if is_defect else "정상")
-                tooltip = raw.get("tooltip") or ("불량으로 예측됨" if is_defect else "정상 동작 중")
+                text  = raw.get("text")  or ("CRITICAL (불량 예측)" if is_defect else "정상")
+                tip   = raw.get("tooltip") or ("불량으로 예측됨" if is_defect else "정상 동작 중")
             else:
                 is_defect = bool(raw)
                 level = "critical" if is_defect else "normal"
-                text = "CRITICAL (불량 예측)" if is_defect else "정상"
-                tooltip = "불량으로 예측됨" if is_defect else "정상 동작 중"
-        else:
-            # defect_indicator가 없으면 기본 정상
-            is_defect = False
-            level = "normal"
-            text = "정상"
-            tooltip = "정상 동작 중"
+                text  = "CRITICAL (불량 예측)" if is_defect else "정상"
+                tip   = "불량으로 예측됨" if is_defect else "정상 동작 중"
+            if level not in LEVEL_CIRCLE_CLASS:
+                level = "critical" if is_defect else "normal"
+            return _state(level, text, tip)
 
-        if level not in LEVEL_CIRCLE_CLASS:
-            level = "critical" if is_defect else "normal"
+        # 특정 코드
+        if "mold_code" not in df.columns:
+            return _state("no_data", ALERT_STATUS_TEXT.get("no_data", "데이터 없음"), None)
 
-        if not text:
-            text = "CRITICAL (불량 예측)" if level == "critical" else ALERT_STATUS_TEXT.get(level, "정상")
-        if not tooltip:
-            tooltip = "불량으로 예측됨" if level == "critical" else "정상 동작 중"
+        df_sel = df[df["mold_code"].astype(str) == selected_code]
+        if df_sel.empty:
+            return _state("no_data", ALERT_STATUS_TEXT.get("no_data", "데이터 없음"), "선택 코드 데이터 없음")
 
-        state.update({
-            "level": level,
-            "text": text,
-            "tooltip": tooltip,
-        })
-        return state
+        # 1) 외부 최신 예측 함수
+        if callable(predict_latest_for_code):
+            try:
+                pred = predict_latest_for_code(selected_code)
+                if pred is not None:
+                    if isinstance(pred, dict):
+                        if "is_defect" in pred:
+                            is_def = bool(pred["is_defect"])
+                        elif "prob" in pred:
+                            is_def = float(pred["prob"]) >= float(proba_thresh)
+                        else:
+                            is_def = False
+                    elif isinstance(pred, (int, np.integer, float, np.floating)):
+                        is_def = float(pred) >= float(proba_thresh)
+                    else:
+                        is_def = bool(pred)
+                    return _state("critical" if is_def else "normal",
+                                  "CRITICAL (불량 예측)" if is_def else "정상",
+                                  "불량으로 예측됨" if is_def else "정상 동작 중")
+            except Exception as e:
+                print(f"[defect_state] predict_latest_for_code 예외: {e}")
 
+        # 2) 마지막 행을 모델에 넣어 예측
+        row = df_sel.iloc[-1]
+        if callable(predict_row):
+            try:
+                pr = predict_row(row)
+                if isinstance(pr, dict):
+                    if "is_defect" in pr:
+                        is_def = bool(pr["is_defect"])
+                    elif "prob" in pr:
+                        is_def = float(pr["prob"]) >= float(proba_thresh)
+                    else:
+                        is_def = False
+                elif isinstance(pr, (int, np.integer, float, np.floating)):
+                    is_def = float(pr) >= float(proba_thresh)
+                else:
+                    is_def = bool(pr)
+                return _state("critical" if is_def else "normal",
+                              "CRITICAL (불량 예측)" if is_def else "정상",
+                              "불량으로 예측됨" if is_def else "정상 동작 중")
+            except Exception as e:
+                print(f"[defect_state] predict_row 예외: {e}")
+
+        # 3) 칼럼 기반 보조
+        if pred_col and pred_col in row.index:
+            pv = pd.to_numeric(row[pred_col], errors="coerce")
+            if np.isfinite(pv):
+                is_def = bool(int(pv)) if pv in (0, 1) else bool(float(pv) >= float(proba_thresh))
+                return _state("critical" if is_def else "normal",
+                              "CRITICAL (불량 예측)" if is_def else "정상",
+                              "불량으로 예측됨" if is_def else "정상 동작 중")
+
+        if proba_col and proba_col in row.index:
+            prob = pd.to_numeric(row[proba_col], errors="coerce")
+            if np.isfinite(prob):
+                is_def = bool(float(prob) >= float(proba_thresh))
+                return _state("critical" if is_def else "normal",
+                              "CRITICAL (불량 예측)" if is_def else "정상",
+                              "불량으로 예측됨" if is_def else "정상 동작 중")
+
+        if "passorfail" in row.index:
+            pf = pd.to_numeric(row["passorfail"], errors="coerce")
+            if np.isfinite(pf):
+                is_def = bool(int(pf) == 1)
+                return _state("critical" if is_def else "normal",
+                              "CRITICAL (불량 예측)" if is_def else "정상",
+                              "불량(학습라벨)" if is_def else "정상 동작 중")
+
+        # 모델 신호가 없으면 정상(초록)
+        return _state("normal", "정상", "선택 코드 데이터 있음(모델 신호 없음)")
+
+    # 불량 표시 UI들
     @output
     @render.ui
     def defect_indicator_ui():
@@ -594,6 +1044,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
         status_class = LEVEL_STATUS_CLASS.get(level, "level-no_data")
         return ui.span(text, class_=f"overlay-light-status {status_class}")
 
+    # 툴팁 빌더 (이상치용)
     def build_anomaly_tooltip(info: dict | None):
         if not info:
             return None
@@ -610,6 +1061,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
             tooltip_parts.append(", ".join(flags))
         return "\n".join(part for part in tooltip_parts if part) or None
 
+    # 오버레이 각 변수 출력 등록
     def register_overlay_alert_outputs(var_name: str, var_label: str):
         circle_id = f"overlay_light_circle_{var_name}"
         status_id = f"overlay_light_status_{var_name}"
@@ -638,30 +1090,13 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
     for var_name, var_label in ALERT_VARIABLES:
         register_overlay_alert_outputs(var_name, var_label)
 
-    @output
-    @render.ui
-    def kpi_cycle():
-        df = shared_df.get()
-        if df.empty or 'production_cycletime' not in df.columns:
-            return ui.h1("0.0 sec", class_="kpi-value")
-        return ui.h1(f"{df['production_cycletime'].mean():.1f} sec", class_="kpi-value")
-
-    @output
-    @render.ui
-    def kpi_uptime():
-        df = shared_df.get()
-        if df.empty or 'working' not in df.columns:
-            return ui.h1("0.0%", class_="kpi-value")
-        working = (df['working'] == '가동').sum()
-        return ui.h1(f"{(working/len(df)*100):.1f}%", class_="kpi-value")
-
+    # 차트
     def create_single_chart(df, mold_code, variable, statuses=None, defect_info=None):
-        """단일 차트를 생성하는 헬퍼 함수"""
         fig, ax = plt.subplots(figsize=(12, 4.5))
         ax.set_facecolor('#f8f9fa')
         fig.patch.set_facecolor('white')
         ax.grid(True, alpha=0.3, linestyle='--')
-        
+
         def empty(title, msg='', ylabel='값', color='black'):
             ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
             ax.set_title(title, fontsize=14, fontweight='bold', pad=20, color=color)
@@ -669,57 +1104,61 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
                 ax.text(0.5, 0.5, msg, ha='center', va='center', fontsize=11, color='#999', transform=ax.transAxes)
             plt.tight_layout()
             return fig
-        
+
         label = get_label(variable)
-        
-        if df.empty or df is None:
+
+        if df is None or df.empty:
             return empty(f'Mold Code {mold_code} - {label}', '데이터 로딩 중...', ylabel=label)
-        
+
         try:
             if 'mold_code' not in df.columns:
                 return empty(f'Mold Code {mold_code} - {label}', 'mold_code 컬럼 없음', label, '#e74c3c')
-            
+
             mold_code_str = str(mold_code)
             df_mold = df['mold_code'].astype(str)
-            
+
             if mold_code_str == "all":
                 filtered = df.copy()
             else:
                 filtered = df[df_mold == mold_code_str].copy()
-            
+
             if filtered.empty:
                 codes = sorted(df['mold_code'].astype(str).unique())
-                return empty(f'{"모든 Mold Code" if mold_code_str == "all" else f"Mold Code {mold_code}"} - {label}', f'데이터 없음\n존재: {", ".join(codes)}', label, '#e74c3c')
-            
+                return empty(f'{"모든 Mold Code" if mold_code_str == "all" else f"Mold Code {mold_code}"} - {label}',
+                             f'데이터 없음\n존재: {", ".join(codes)}', label, '#e74c3c')
+
             if variable not in filtered.columns:
                 return empty(f'Mold Code {mold_code} - {label}', f'"{label}" 없음', label, '#e74c3c')
-            
+
             if 'registration_time' in filtered.columns:
                 filtered = filtered.sort_values('registration_time')
-                plot_df = filtered[['registration_time', variable]].dropna().reset_index(drop=True).tail(10)
+                plot_df = filtered[['registration_time', variable]].copy()
+                plot_df[variable] = pd.to_numeric(plot_df[variable], errors='coerce')
+                plot_df = plot_df.dropna().reset_index(drop=True).tail(10)
             else:
-                plot_df = filtered[[variable]].dropna().reset_index(drop=True).tail(10)
-            
+                plot_df = filtered[[variable]].copy()
+                plot_df[variable] = pd.to_numeric(plot_df[variable], errors='coerce')
+                plot_df = plot_df.dropna().reset_index(drop=True).tail(10)
+
             if plot_df.empty:
                 return empty(f'Mold Code {mold_code} - {label}', '결측치만 존재', label, '#e74c3c')
-            
+
             if 'registration_time' in plot_df.columns:
                 x_time = pd.to_datetime(plot_df['registration_time'], errors='coerce')
                 use_time_axis = True
             else:
                 x_time = range(len(plot_df))
                 use_time_axis = False
-            
+
             y = plot_df[variable].values
-            
             try:
                 y = y.astype(float)
             except:
                 return empty(f'Mold Code {mold_code} - {label}', '숫자 데이터 아님', label, '#e74c3c')
-            
+
             ax.plot(x_time, y, color='#4A90E2', linewidth=2, marker='o', markersize=6,
-                   markerfacecolor='#2c3e50', markeredgecolor='white', markeredgewidth=1.5)
-            
+                    markerfacecolor='#2c3e50', markeredgecolor='white', markeredgewidth=1.5)
+
             mean = y.mean()
             ax.axhline(y=mean, color='#e74c3c', linestyle='--', linewidth=2, alpha=0.7, label=f'평균: {mean:.2f}')
 
@@ -742,19 +1181,20 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
                     zorder=5,
                     label='알림 발생 지점'
                 )
-            
+
             if use_time_axis:
                 import matplotlib.dates as mdates
                 ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
                 ax.xaxis.set_major_locator(mdates.AutoDateLocator())
                 ax.tick_params(axis='x', labelsize=8)
-            
+
             ax.set_ylabel(label, fontsize=12, fontweight='bold')
-            ax.set_title(f'{"모든 Mold Code" if mold_code_str == "all" else f"Mold Code {mold_code}"} - {label}', fontsize=14, fontweight='bold', pad=20)
+            ax.set_title(f'{"모든 Mold Code" if mold_code_str == "all" else f"Mold Code {mold_code}"} - {label}',
+                         fontsize=14, fontweight='bold', pad=20)
             ax.legend(loc='best', fontsize=10)
             plt.tight_layout()
             return fig
-            
+
         except Exception as e:
             return empty('오류 발생', str(e)[:50], color='#e74c3c')
 
@@ -772,8 +1212,8 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
                 return fig
 
             df_local = shared_df.get()
-            statuses = anomaly_summary()
-            defect_info = defect_state()
+            statuses = anomaly_summary()   # 이상치(기존)
+            defect_info = defect_state()   # 모델 불량 경보
             return create_single_chart(
                 df_local,
                 input.mold_code_select(),
@@ -791,17 +1231,13 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active, de
     @render.data_frame
     def tab1_table_realtime():
         df = shared_df.get()
-        
-        if df.empty:
+        if df is None or df.empty:
             return render.DataGrid(
                 pd.DataFrame({"메시지": ["데이터를 불러오는 중..."] + [""] * 9}),
                 width="100%", filters=False, row_selection_mode="none"
             )
-        
         result = df.tail(10).drop(columns=['line', 'name', 'mold_name'], errors='ignore').copy()
-        
         if len(result) < 10:
             pad = pd.DataFrame([[None] * len(result.columns)] * (10 - len(result)), columns=result.columns)
             result = pd.concat([result, pad], ignore_index=True)
-        
         return render.DataGrid(result, width="100%", filters=False, row_selection_mode="none")
