@@ -1,4 +1,3 @@
-# modules/tab_target_qc_team.py
 from shiny import ui, render, reactive
 import pandas as pd
 import numpy as np
@@ -21,7 +20,7 @@ RAW_DIR = BASE_DIR / "data" / "raw"
 DATA_PATH = RAW_DIR / "train.csv"
 MODEL_ARTIFACT_PATH = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
 PI_TABLE_PATH = BASE_DIR / "reports" / "permutation_importance_valid.csv"
-STABLE_BASELINE_FILE = BASE_DIR / "reports" / "관리도평균,표준편차.csv"
+CONTROL_LIMITS_PATH = BASE_DIR / "data" / "관리도평균_표준편차.csv"
 
 PDP_GRID_SIZE = 15
 ICE_SAMPLE_SIZE = 25
@@ -45,6 +44,15 @@ def read_raw_data():
     return df
 
 
+def load_control_limits():
+    """관리한계 평균 및 표준편차 CSV 파일 로드"""
+    try:
+        df = pd.read_csv(CONTROL_LIMITS_PATH)
+        return df
+    except FileNotFoundError:
+        return None
+
+
 try:
     _mold_df = read_raw_data()
     MOLD_CODE_CHOICES = sorted(_mold_df['mold_code'].dropna().astype(str).unique().tolist())
@@ -52,7 +60,7 @@ try:
 except (FileNotFoundError, KeyError):
     MOLD_CODE_CHOICES = []
 
-# UI에 표시할 변수 한글명 매핑
+### UI에 표시할 변수 한글명 매핑
 VARIABLE_LABELS = {
     "molten_temp": "용탕 온도",
     "low_section_speed": "하부 구간 속도",
@@ -542,16 +550,13 @@ def evaluate_mci_metric(df, variable, label, bundle, metadata, threshold=MCI_THR
         result["details"] = "표준편차를 계산할 수 없습니다."
         return result
 
-    cpu = (safe_max - mean) / (3 * std)
-    cpl = (mean - safe_min) / (3 * std)
-    cpk = min(cpu, cpl)
+    # Cpk 계산: actual_range를 규격 한계(USL/LSL)로 사용
+    cpu = (actual_max - mean) / (3 * std)
+    cpl = (mean - actual_min) / (3 * std)
+    cpk = abs(min(cpu, cpl))  # 절댓값 적용
     result["cpk"] = cpk
 
-    if cpk < 0:
-        result["status"] = "위험"
-        result["details"] = "평균이 허용 구간 밖에 있습니다."
-        return result
-
+    # 상태 판정
     for status, threshold_value in CPK_STATUS_RULES:
         if cpk >= threshold_value:
             result["status"] = status
@@ -657,6 +662,7 @@ def calculate_p_chart(df, subgroup_size=5):
 
 # Xbar-R 관리도 계산 함수 (날짜 기반 - registration_time 사용)
 def calculate_xbar_r_chart_by_date(df, variable):
+    """날짜 기반 Xbar-R 관리도 계산 (CSV의 평균/표준편차 사용)"""
     df['date_only'] = df['registration_time'].dt.date
     
     date_stats = df.groupby('date_only')[variable].agg([
@@ -664,10 +670,59 @@ def calculate_xbar_r_chart_by_date(df, variable):
         ('range', lambda x: x.max() - x.min())
     ]).reset_index()
     
+    # CSV 파일에서 관리한계 값 불러오기
+    control_limits_df = load_control_limits()
+    
+    if control_limits_df is not None and 'mold_code' in df.columns:
+        # 현재 데이터의 금형 코드 추출 (가장 많이 나온 금형 사용)
+        mold_code = df['mold_code'].mode()[0] if not df['mold_code'].mode().empty else None
+        
+        if mold_code is not None:
+            # CSV에서 해당 금형과 변수에 대한 평균, 표준편차, n 가져오기
+            limit_row = control_limits_df[
+                (control_limits_df['mold_code'] == int(mold_code)) & 
+                (control_limits_df['variable'] == variable)
+            ]
+            
+            if not limit_row.empty:
+                xbar_bar = limit_row['mean'].values[0]
+                std = limit_row['std'].values[0]
+                n = limit_row['n'].values[0]
+                
+                # 표준편차 기반 관리한계 계산: X̄ ± 3σ/√n
+                UCL_xbar = xbar_bar + 3 * std / np.sqrt(n)
+                LCL_xbar = xbar_bar - 3 * std / np.sqrt(n)
+                
+                # R 관리도는 기존 방식 유지
+                r_bar = date_stats['range'].mean()
+                n_bar = df.groupby('date_only').size().mean()
+                n_rounded = int(round(n_bar))
+                n_rounded = max(2, min(10, n_rounded))
+                
+                control_chart_constants = {
+                    2: {'D3': 0, 'D4': 3.267},
+                    3: {'D3': 0, 'D4': 2.574},
+                    4: {'D3': 0, 'D4': 2.282},
+                    5: {'D3': 0, 'D4': 2.114},
+                    6: {'D3': 0, 'D4': 2.004},
+                    7: {'D3': 0.076, 'D4': 1.924},
+                    8: {'D3': 0.136, 'D4': 1.864},
+                    9: {'D3': 0.184, 'D4': 1.816},
+                    10: {'D3': 0.223, 'D4': 1.777}
+                }
+                
+                constants = control_chart_constants.get(n_rounded, control_chart_constants[5])
+                D3 = constants['D3']
+                D4 = constants['D4']
+                
+                UCL_r = D4 * r_bar
+                LCL_r = D3 * r_bar
+                
+                return date_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r
+    
+    # CSV 파일이 없거나 데이터를 찾을 수 없는 경우 기존 방식 사용
     xbar_bar = date_stats['mean'].mean()
-    
     r_bar = date_stats['range'].mean()
-    
     n_bar = df.groupby('date_only').size().mean()
     
     control_chart_constants = {
@@ -700,6 +755,7 @@ def calculate_xbar_r_chart_by_date(df, variable):
 
 # Xbar-R 관리도 계산 함수
 def calculate_xbar_r_chart(df, variable, subgroup_size=5):
+    """서브그룹 기반 Xbar-R 관리도 계산 (CSV의 평균/표준편차 사용)"""
     if variable not in df.columns:
         raise ValueError(f"{variable} 컬럼이 없습니다.")
     
@@ -713,8 +769,59 @@ def calculate_xbar_r_chart(df, variable, subgroup_size=5):
         ('range', lambda x: x.max() - x.min())
     ]).reset_index()
     
-    xbar_bar = subgroup_stats['mean'].mean()
+    # CSV 파일에서 관리한계 값 불러오기
+    control_limits_df = load_control_limits()
     
+    if control_limits_df is not None and 'mold_code' in df.columns:
+        # 현재 데이터의 금형 코드 추출 (가장 많이 나온 금형 사용)
+        mold_code = df['mold_code'].mode()[0] if not df['mold_code'].mode().empty else None
+        
+        if mold_code is not None:
+            # CSV에서 해당 금형과 변수에 대한 평균, 표준편차, n 가져오기
+            limit_row = control_limits_df[
+                (control_limits_df['mold_code'] == int(mold_code)) & 
+                (control_limits_df['variable'] == variable)
+            ]
+            
+            if not limit_row.empty:
+                xbar_bar = limit_row['mean'].values[0]
+                std = limit_row['std'].values[0]
+                n = limit_row['n'].values[0]
+                
+                # 표준편차 기반 관리한계 계산: X̄ ± 3σ/√n
+                UCL_xbar = xbar_bar + 3 * std / np.sqrt(n)
+                LCL_xbar = xbar_bar - 3 * std / np.sqrt(n)
+                
+                # R 관리도는 기존 방식 유지
+                r_bar = subgroup_stats['range'].mean()
+                
+                control_chart_constants = {
+                    2: {'D3': 0, 'D4': 3.267},
+                    3: {'D3': 0, 'D4': 2.574},
+                    4: {'D3': 0, 'D4': 2.282},
+                    5: {'D3': 0, 'D4': 2.114},
+                    6: {'D3': 0, 'D4': 2.004},
+                    7: {'D3': 0.076, 'D4': 1.924},
+                    8: {'D3': 0.136, 'D4': 1.864},
+                    9: {'D3': 0.184, 'D4': 1.816},
+                    10: {'D3': 0.223, 'D4': 1.777}
+                }
+                
+                if subgroup_size == 1:
+                    constants = {'D3': 0, 'D4': 3.267}
+                else:
+                    constants = control_chart_constants.get(subgroup_size, control_chart_constants[5])
+                
+                D3 = constants['D3']
+                D4 = constants['D4']
+                
+                UCL_r = D4 * r_bar
+                LCL_r = D3 * r_bar
+                
+                return subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r
+    
+    # CSV 파일이 없거나 데이터를 찾을 수 없는 경우 기존 방식 사용
+    xbar_bar = subgroup_stats['mean'].mean()
     r_bar = subgroup_stats['range'].mean()
     
     control_chart_constants = {
@@ -748,240 +855,256 @@ def calculate_xbar_r_chart(df, variable, subgroup_size=5):
     
     return subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r
 
+# =========================
 # 탭별 UI
+# =========================
 tab_ui = ui.page_fluid(
-ui.tags.style("""
-    .mci-metric-card{
-        position:relative;
-        padding:0;
-        border-radius:20px;
-        min-height:180px;
-        background:#2A2D30;
-        box-shadow:0 6px 20px rgba(0,0,0,0.15);
-        margin-bottom:12px;
-    }
-    .mci-card-outer{
-        background:#2A2D30;
-        border-radius:20px;
-        padding:2.5px;
-        height:100%;
-        display:flex;
-        flex-direction:column;
-    }
-    .mci-card-header{
-        color:white;
-        padding:8px 8px 8px 8px;
-        font-size:0.8rem;
-        font-weight:600;
-        text-align:center;
-        letter-spacing:0.5px;
-    }
-    .mci-card-inner{
-        background:#f5f5f5;
-        border-radius:16px;
-        padding:24px 20px;
-        flex:1;
-        display:flex;
-        flex-direction:column;
-        justify-content:center;
-        align-items:center;
-    }
-    .mci-value-main{
-        font-size:1.0rem;
-        font-weight:700;
-        color:#000000;
-        margin-bottom:8px;
-        line-height:1;
-    }
-    .mci-metric-card .mci-detail{
-        font-size:0.75rem;
-        color:#555555;
-        margin:3px 0;
-        text-align:center;
-        line-height:1.3;
-    }
-    .mci-cards-row{gap:12px; margin-bottom:20px;}
-    .mci-info-icon{
-        display:inline-block;
-        width:16px;
-        height:16px;
-        background-color:#555555;
-        color:white;
-        border-radius:50%;
-        text-align:center;
-        line-height:16px;
-        font-size:0.7rem;
-        font-weight:bold;
-        cursor:help;
-        margin-left:4px;
-        transition: all 0.3s ease;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .mci-info-icon:hover{
-        background-color:#4A90E2;
-        transform: scale(1.25);
-        box-shadow: 0 6px 12px rgba(74, 144, 226, 0.4);
-    }
+    ui.tags.style("""
+        .mci-metric-card {
+            position: relative;
+            padding: 0;
+            border-radius: 10px;
+            min-height: 180px;
+            background: #2A2D30;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+            margin-bottom: 12px;
+            transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+            overflow: hidden;
+        }
+        .mci-metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%;
+            width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+            transition: left 0.6s ease; z-index: 10; pointer-events: none;
+        }
+        .mci-metric-card:hover { transform: translateY(-8px); box-shadow: 0 12px 32px rgba(0,0,0,0.25); }
+        .mci-metric-card:hover::before { left: 100%; }
+        .mci-metric-card.status-stable { border-left: 4px solid #28a745; }
+        .mci-metric-card.status-caution { border-left: 4px solid #ffc107; }
+        .mci-metric-card.status-danger { border-left: 4px solid #aeaeb1; }
+        .mci-metric-card.status-unknown { border-left: 4px solid #6c757d; }
+        .mci-card-outer { background: #2A2D30; border-radius: 10px; padding: 2.5px; height: 100%; display: flex; flex-direction: column; }
+        .mci-card-header { color: white; padding: 8px; font-size: 0.8rem; font-weight: 600; text-align: center; letter-spacing: 0.5px; }
+        .mci-card-inner { background: #f5f5f5; border-radius: 5px; padding: 24px 20px; flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .mci-value-main { font-size: 1.0rem; font-weight: 700; color: #000; margin-bottom: 8px; line-height: 1; animation: fadeInScale 0.6s ease-out; }
+        @keyframes fadeInScale { from {opacity:0; transform:scale(0.8);} to {opacity:1; transform:scale(1);} }
+        .mci-detail { font-size: 0.75rem; color: #555; margin: 3px 0; text-align: center; line-height: 1.3; animation: slideInUp 0.6s ease-out 0.1s both; }
+        @keyframes slideInUp { from {opacity:0; transform:translateY(8px);} to {opacity:1; transform:translateY(0);} }
+        .mci-cards-row { gap: 12px; margin-bottom: 20px; }
+        .mci-info-icon { display: inline-block; width:16px; height:16px; background:#555; color:#fff; border-radius:50%; text-align:center; line-height:16px; font-size:0.7rem; font-weight:bold; cursor:pointer; margin-left:4px; transition: all .3s cubic-bezier(0.34,1.56,0.64,1); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .popover-body { white-space: pre-line; }
+        .mci-info-icon:hover { background:#4A90E2; transform: scale(1.3) rotate(10deg); box-shadow: 0 6px 16px rgba(74,144,226,.5); }
+
+        /* 대시보드 큰 카드 */
+        .mci-dashboard-card{ --mci-radius:16px; border-radius:var(--mci-radius); overflow:hidden; }
+        .mci-filter-header{ background:#2B2D30; color:#fff; padding:6px 12px; line-height:1.05; border-bottom:none; }
+        .mci-section{ padding:12px 16px; }
+        .mci-section-title{ font-weight:700; font-size:1rem; margin:8px 0 12px; }
+        .mci-divider{ height:1px; background:rgba(0,0,0,.08); margin:8px 0 16px; }
+        .mci-dashboard-card,
+        .mci-dashboard-card * {
+            font-family: inherit;
+        }
+        .mci-dashboard-card .form-label,
+        .mci-dashboard-card label {
+            font-size:0.85rem;
+            font-weight:600;
+            color:#2B2D30;
+        }
+        .mci-dashboard-card .selectize-input,
+        .mci-dashboard-card .btn,
+        .mci-dashboard-card .form-control,
+        .mci-dashboard-card .form-select {
+            font-size:0.85rem;
+        }
+        .mci-apply-btn{
+            background-color:#2B2D30;
+            border-color:#2B2D30;
+            color:#ffffff;
+            transition:background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+        }
+        .mci-apply-btn:hover,
+        .mci-apply-btn:focus{
+            background-color:#35373B;
+            border-color:#35373B;
+            color:#ffffff;
+            transform:translateY(-1px);
+        }
+        .mci-apply-btn:active{
+            background-color:#1F2023;
+            border-color:#1F2023;
+            transform:translateY(0);
+        }
+        .mci-apply-btn:disabled{
+            opacity:0.6;
+            pointer-events:none;
+        }
     """),
 
-    ui.output_ui("qc_snapshot_status"),
-    ui.output_ui("mci_overview"),
-    
+    # === 하나의 큰 카드 안에 모든 것(필터+개요+관리도) 포함 ===
+    ui.div(ui.output_ui("mci_overview"), class_="mci-section"),
     ui.card(
-        ui.card_header("필터 설정"),
-        ui.tags.style("""
-        #filter-section .form-label {
-            white-space: normal;
-        }
-        #filter-section .layout-columns {
-            gap: 16px !important;
-        }
-        #filter-section .shiny-input-container {
-            width: 100%;
-        }
-        #filter-section .selectize-input {
-            padding: 10px !important;
-            min-height: 46px !important;
-            border-radius: 8px !important;
-        }
-        """),
+        ui.card_header(
+            ui.div(
+                ui.span("필터 설정", class_="fw-semibold", style="font-size:0.9rem;"),
+                ui.tags.button(
+                    ui.span("접기", id="filter-toggle-label"),
+                    id="filter-toggle-btn",
+                    class_="btn btn-sm btn-outline-light",
+                    type="button",
+                    data_bs_toggle="collapse",
+                    data_bs_target="#filter-section",
+                    aria_expanded="true",
+                    aria_controls="filter-section",
+                    style="padding:2px 8px; font-size:0.75rem;"
+                ),
+                class_="d-flex justify-content-between align-items-center"
+            ),
+            class_="mci-filter-header"
+        ),
+
+        # (1) 필터 섹션 (접힘/펼침)
         ui.div(
-            ui.layout_columns(
+            ui.div(
                 ui.input_radio_buttons(
-                    "analysis_mode",
-                    "분석 모드",
-                    choices={
-                        "subgroup": "서브그룹 기반 분석",
-                        "date": "날짜 기반 분석"
-                    },
-                    selected="subgroup",
-                    inline=True
+                    "analysis_mode", "분석 종류 선택",
+                    choices={"subgroup":"서브그룹 기반 분석", "date":"날짜 기반 분석"},
+                    selected="subgroup", inline=True, width="100%"
+                ),
+                ui.panel_conditional(
+                    "input.analysis_mode === 'subgroup'",
+                    ui.tags.p("현재 서브그룹 기반 분석은 n=100으로 고정되어 적용됩니다.", class_="text-muted small mb-2")
+                ),
+                class_="mb-3"
+            ),
+            ui.panel_conditional(
+                "input.analysis_mode === 'date'",
+                ui.div(
+                    ui.input_date_range(
+                        "date_range", "날짜 범위 (2019-01-02 ~ 2019-03-12)",
+                        start="2019-01-02", end="2019-03-12", min="2019-01-02", max="2019-03-12", width="100%"
+                    ),
+                    class_="mb-3"
+                ),
+            ),
+            ui.layout_columns(
+                ui.input_selectize(
+                    "mold_code", "금형 코드",
+                    choices=MOLD_CODE_CHOICES, multiple=False,
+                    selected="8600",
+                    options={"placeholder": "금형 코드를 선택하세요"}
                 ),
                 ui.input_selectize(
-                    "mold_code",
-                    "금형 코드",
-                    choices=MOLD_CODE_CHOICES,
-                    multiple=False,
-                    options={
-                        "placeholder": "금형 코드를 선택하세요",
-                        "dropdownParent": "body"
-                    }
-                ),
-                ui.input_selectize(
-                    "xbar_variable",
-                    "Xbar-R 변수",
-                    choices=VARIABLE_LABELS,
-                    selected="physical_strength",
-                    options={
-                        "placeholder": "관리도에 사용할 변수를 선택하세요",
-                        "dropdownParent": "body"
-                    },
+                    "xbar_variable", "Xbar-R 변수",
+                    choices=VARIABLE_LABELS, selected="sleeve_temperature",
+                    options={"placeholder": "관리도에 사용할 변수를 선택하세요", "dropdownParent": "body"},
                     width="100%"
                 ),
-                col_widths=[4, 4, 4]
+                col_widths=[6,6],
+                class_="mb-3"
             ),
-            class_="mb-3",
-            id="filter-section"
-        ),
-        ui.panel_conditional(
-            "input.analysis_mode === 'subgroup'",
+            ui.tags.p("선택한 변수 기준으로 P, Xbar, R 관리도가 계산됩니다.", class_="text-muted small mb-2"),
             ui.div(
-                ui.layout_columns(
-                    ui.input_numeric("subgroup_start", "시작 서브그룹", value=0, min=0, width="100%"),
-                    ui.input_numeric("subgroup_end", "종료 서브그룹", value=100, min=1, width="100%"),
-                    col_widths=[6, 6],
-                    class_="align-items-end"
+                ui.input_action_button("reset_filter", "필터 초기화", class_="btn btn-outline-secondary me-2"),
+                ui.input_action_button("apply_filter", "필터 적용", class_="btn mci-apply-btn"),
+                class_="d-flex justify-content-end"
+            ),
+            id="filter-section",
+            class_="collapse show mci-section"
+        ),
+
+        # 접힘/펼침 라벨 스크립트
+        ui.tags.script("""
+        (function(){
+          function updateLabel(expanded){
+            var l=document.getElementById('filter-toggle-label');
+            var b=document.getElementById('filter-toggle-btn');
+            if(!l||!b) return;
+            l.textContent = expanded ? '접기' : '열기';
+            b.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+          }
+          function bind(){
+            var s=document.getElementById('filter-section');
+            if(!s||s.__bound) return; s.__bound=true;
+            s.addEventListener('shown.bs.collapse',  function(){ updateLabel(true);  });
+            s.addEventListener('hidden.bs.collapse', function(){ updateLabel(false); });
+          }
+          document.addEventListener('DOMContentLoaded', bind);
+          document.addEventListener('shiny:connected', bind);
+          document.addEventListener('shiny:value', function(){ setTimeout(bind, 0); });
+        })();
+        """),
+
+        ui.div(class_="mci-divider"),
+
+        # (2) MCI 개요 카드들
+
+        # (3) P 관리도
+        ui.div(
+            ui.div("P 관리도 (불량률)", class_="mci-section-title"),
+            ui.output_plot("plot_p_chart", height="550px"),
+            class_="mci-section"
+        ),
+
+        # (4) Xbar / R 관리도
+        ui.div(
+            ui.layout_columns(
+                ui.div(
+                    ui.div("Xbar 관리도 (평균)", class_="mci-section-title"),
+                    ui.output_plot("plot_xbar_chart", height="620px"),
+                    class_="mci-section"
                 ),
                 ui.div(
-                    ui.tags.small("서브그룹 기반 분석은 서브그룹 크기 n=100으로 고정됩니다."),
-                    class_="text-muted mt-2"
-                )
+                    ui.div("R 관리도 (범위)", class_="mci-section-title"),
+                    ui.output_plot("plot_r_chart", height="620px"),
+                    class_="mci-section"
+                ),
+                col_widths=[6,6]
             )
         ),
-        ui.panel_conditional(
-            "input.analysis_mode === 'date'",
-            ui.input_date_range(
-                "date_range",
-                "날짜 범위 (2019-01-02 ~ 2019-03-12)",
-                start="2019-01-02",
-                end="2019-03-12",
-                min="2019-01-02",
-                max="2019-03-12",
-                width="100%"
-            ),
-        ),
-        ui.tags.p(
-            "선택한 변수 기준으로 P, Xbar, R 관리도가 계산됩니다.",
-            class_="text-muted small mb-2"
-        ),
-        ui.div(
-            ui.input_action_button(
-                "apply_filter",
-                "필터 적용",
-                class_="btn-primary"
-            ),
-            class_="d-flex justify-content-end"
-        ),
-    ),
 
-    ui.card(
-        ui.card_header("P 관리도 (불량률)"),
-        ui.output_plot("plot_p_chart", height="550px"),
-    ),
-    
-    ui.layout_columns(
-        ui.card(
-            ui.card_header("Xbar 관리도 (평균)"),
-            ui.output_plot("plot_xbar_chart", height="620px"),
-            style="min-height: 680px;"
-        ),
-        ui.card(
-            ui.card_header("R 관리도 (범위)"),
-            ui.output_plot("plot_r_chart", height="620px"),
-            style="min-height: 680px;"
-        ),
-        col_widths=[6, 6]
+        class_="mci-dashboard-card"
     )
 )
 
+# =========================
 # 탭별 서버
-def tab_server(input, output, session, streamer=None, shared_df: reactive.Value | None = None, streaming_active: reactive.Value | None = None):
-    # 스냅샷 상태 (탭 3 체류 동안 고정)
-    snapshot_df = reactive.Value(pd.DataFrame())
-    snapshot_info = reactive.Value("")
-
-    @reactive.effect
-    def _capture_snapshot_on_tab_entry():
-        active = input.active_tab()
-        # 탭 3(qc) 진입 시 1회 캡처
-        if active == 'qc':
-            current_stream = shared_df.get() if shared_df is not None else pd.DataFrame()
-            snap = build_qc_snapshot(current_stream)
-            snapshot_df.set(snap)
-            # 정보 문자열 구성
-            past_count = len(snap) - (len(current_stream) if isinstance(current_stream, pd.DataFrame) else 0)
-            info = f"스냅샷 고정: 총 {len(snap):,}행 (과거≈{past_count:,} + 스트리밍≈{len(current_stream):,})"
-            snapshot_info.set(info)
+# =========================
+def tab_server(input, output, session):
+    # 필터 초기화 기능
+    @reactive.Effect
+    @reactive.event(input.reset_filter)
+    def _():
+        from shiny import ui as shiny_ui
+        ui.update_radio_buttons("analysis_mode", selected="subgroup")
+        ui.update_date_range("date_range", start="2019-01-02", end="2019-03-12")
+        # 금형 코드를 8600으로 초기화
+        ui.update_selectize(
+            "mold_code", 
+            choices=MOLD_CODE_CHOICES,
+            selected="8600"
+        )
+        # Xbar-R 변수를 슬리브 온도로 초기화
+        ui.update_selectize("xbar_variable", selected="sleeve_temperature")
     
     def current_filters():
         with reactive.isolate():
             analysis_mode = input.analysis_mode()
             mold_selection = input.mold_code()
-            if mold_selection is None or mold_selection == "":
-                mold_codes = []
-            elif isinstance(mold_selection, (list, tuple)):
+            if isinstance(mold_selection, (list, tuple)):
                 mold_codes = list(mold_selection)
+            elif mold_selection:
+                mold_codes = [mold_selection]
             else:
-                mold_codes = [str(mold_selection)]
+                mold_codes = []
             date_range = input.date_range()
-            subgroup_start_value = input.subgroup_start()
-            subgroup_end_value = input.subgroup_end()
             variable = input.xbar_variable()
 
-        # Step 2: 서브그룹 크기 n=100 고정
         subgroup_size = 100
-        subgroup_start = int(subgroup_start_value) if subgroup_start_value is not None else 0
-        subgroup_end = int(subgroup_end_value) if subgroup_end_value is not None else subgroup_start + 100
+        subgroup_start = 0
+        subgroup_end = 100
 
         return {
             "analysis_mode": analysis_mode,
@@ -1036,73 +1159,90 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
             if min_val is None or max_val is None:
                 return "데이터 없음"
             return f"[{min_val:.2f}, {max_val:.2f}]"
+        
+        def get_status_class(status):
+            if status == "안정":
+                return "stable"
+            elif status == "주의":
+                return "caution"
+            elif status == "위험":
+                return "danger"
+            else:
+                return "unknown"
 
         cards = []
 
         overall_cpk = metrics_payload.get("overall_cpk")
         overall_status = metrics_payload.get("overall_status", "데이터 부족")
+        overall_status_class = get_status_class(overall_status)
 
         cards.append(
             ui.div(
                 ui.div(
                     ui.div("모델 기반 최소 CPK", class_="mci-card-header"),
                     ui.div(
-                        ui.div(format_cpk(overall_cpk), class_="mci-value-main"),
-                        ui.p(f"상태: {overall_status}", class_="mci-detail"),
+                        ui.div(
+                            format_cpk(overall_cpk), 
+                            class_="mci-value-main",
+                            style="font-size: 2.2em; font-weight: 900;" if overall_status == "위험" else ""
+                        ),
+                        ui.p(
+                            overall_status,
+                            class_="mci-detail",
+                            style="color: #dc3545; font-weight: 900; font-size: 1.4em;" if overall_status == "위험" else "",
+                        ),
                         class_="mci-card-inner"
                     ),
                     class_="mci-card-outer"
                 ),
-                class_="mci-metric-card",
+                class_=f"mci-metric-card status-{overall_status_class}",
             )
         )
 
         for metric in metrics_payload.get("metrics", []):
-           status = metric.get("status", "데이터 부족")
+            status = metric.get("status", "데이터 부족")
+            status_class = get_status_class(status)
 
-           # 허용/실제 범위 정보를 툴팁용으로 준비
-           safe_range_text = format_range(metric.get('safe_min'), metric.get('safe_max'))
-           actual_range_text = format_range(metric.get('actual_min'), metric.get('actual_max'))
-           tooltip_content = f"허용: {safe_range_text}\n실제: {actual_range_text}"
+            safe_range_text = format_range(metric.get('safe_min'), metric.get('safe_max'))
+            actual_range_text = format_range(metric.get('actual_min'), metric.get('actual_max'))
+            tooltip_content = f"허용: {safe_range_text}<br>실제: {actual_range_text}"
 
-           cards.append(
-               ui.div(
-                   ui.div(
-                       ui.div(
-                           ui.span(metric.get("label", metric.get("variable", "")), style="margin-right: 6px;"),
-                           ui.span(
-                               "ⓘ",
-                               class_="mci-info-icon",
-                               data_bs_toggle="tooltip",
-                               data_bs_placement="right",
-                               title=tooltip_content,
-                               style="display: inline-block;"
-                           ),
-                           class_="mci-card-header"
-                       ),
-                       ui.div(
-                           ui.div(format_cpk(metric.get("cpk")), class_="mci-value-main"),
-                           ui.p(
-                               ui.span(
-                                   "상태: ",
-                                   ui.span(status),
-                                   ui.span(
-                                       "ⓘ",
-                                       class_="mci-info-icon",
-                                       data_bs_toggle="tooltip",
-                                       data_bs_placement="top",
-                                       title="프로세스 상태: 안정(≥1.33), 주의(1.0~1.33), 위험(<1.0)"
-                                   )
-                               ),
-                               class_="mci-detail"
-                           ),
-                           class_="mci-card-inner"
-                       ),
-                       class_="mci-card-outer"
-                   ),
-                   class_="mci-metric-card",
-               )
-           )
+            cards.append(
+                ui.div(
+                    ui.div(
+                        ui.div(
+                            ui.span(metric.get("label", metric.get("variable", "")), style="margin-right: 6px;"),
+                            ui.span(
+                                "ⓘ",
+                                class_="mci-info-icon",
+                                data_bs_toggle="tooltip",
+                                data_bs_placement="right",
+                                data_bs_trigger="click",
+                                title=tooltip_content,
+                                style="display: inline-block; cursor: pointer;"
+                            ),
+                            class_="mci-card-header"
+                        ),
+                        ui.div(
+                            ui.div(
+                                format_cpk(metric.get("cpk")), 
+                                class_="mci-value-main",
+                                style="font-size: 2.2em; font-weight: 900;" if status == "위험" else ""
+                            ),
+                            ui.p(
+                                ui.span(
+                                    status,
+                                    style="color: #dc3545; font-weight: 900; font-size: 1.4em;" if status == "위험" else "",
+                                ),
+                                class_="mci-detail"
+                            ),
+                            class_="mci-card-inner"
+                        ),
+                        class_="mci-card-outer"
+                    ),
+                    class_=f"mci-metric-card status-{status_class}",
+                )
+            )
 
         return ui.div(
             ui.layout_columns(*cards, col_widths=[3] * len(cards)),
@@ -1112,123 +1252,88 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
     @render.plot
     def plot_p_chart():
         input.apply_filter()
-        
         filters = current_filters()
-        
         mold_codes = filters["mold_codes"] or None
-        
         analysis_mode = filters["analysis_mode"]
-        
+
         if analysis_mode == "date":
             date_range = filters["date_range"]
             date_start = date_range[0] if date_range else None
             date_end = date_range[1] if date_range else None
-            
             df = load_and_filter_data(date_start=date_start, date_end=date_end, mold_codes=mold_codes)
-            
             date_stats, p_bar, UCL, LCL = calculate_p_chart_by_date(df)
             display_data = date_stats
             x_column = 'date_only'
             x_label = '날짜'
-            title = f'P 관리도 (날짜 기반)'
+            title = 'P 관리도 (날짜 기반)'
         else:
             df = load_and_filter_data(mold_codes=mold_codes)
             subgroup_size = filters["subgroup_size"]
-            
             subgroup_stats, p_bar, UCL, LCL = calculate_p_chart(df, subgroup_size=subgroup_size)
-            
             start = max(0, filters["subgroup_start"])
             end = min(len(subgroup_stats), filters["subgroup_end"])
             display_data = subgroup_stats.iloc[start:end]
             x_column = 'subgroup'
             x_label = '서브그룹 번호'
             title = f'P 관리도 (서브그룹 기반, n={subgroup_size})'
-        
+
         fig, ax = plt.subplots(figsize=(14, 6))
-        
+
         if len(display_data) > 0 and analysis_mode == "subgroup":
             ax.set_xlim(display_data[x_column].min() - 1, display_data[x_column].max() + 1)
-        
+
         warn_upper = p_bar + (UCL - p_bar) * 2/3
         warn_lower = p_bar - (p_bar - LCL) * 2/3
-        
         out_of_control = (display_data['p'] > UCL) | (display_data['p'] < LCL)
-        
-        ax.plot(display_data[x_column], display_data['p'],
-                color='#2E86AB', linewidth=2, linestyle='-', zorder=2)
-        
-        ax.scatter(display_data.loc[~out_of_control, x_column], 
-                  display_data.loc[~out_of_control, 'p'],
-                  color='#2E86AB', s=45, marker='o',
-                  label='불량률 (P)', zorder=3)
-        
+
+        ax.plot(display_data[x_column], display_data['p'], color='#2E86AB', linewidth=2, linestyle='-', zorder=2)
+        ax.scatter(display_data.loc[~out_of_control, x_column], display_data.loc[~out_of_control, 'p'],
+                   color='#2E86AB', s=45, marker='o', label='불량률 (P)', zorder=3)
         if out_of_control.any():
-            ax.scatter(display_data.loc[out_of_control, x_column], 
-                      display_data.loc[out_of_control, 'p'],
-                      color='red', s=55, marker='o',
-                      label='관리한계 초과', zorder=4)
-        
-        ax.axhline(y=p_bar, color='green', linestyle='-', linewidth=2, 
-                   label=f'중심선 (P̄ = {p_bar:.4f})', zorder=1)
-        
-        ax.axhline(y=UCL, color='red', linestyle='--', linewidth=2, 
-                   label=f'상한 관리한계선 (UCL = {UCL:.4f})', zorder=1)
-        
-        ax.axhline(y=LCL, color='red', linestyle='--', linewidth=2, 
-                   label=f'하한 관리한계선 (LCL = {LCL:.4f})', zorder=1)
-        
-        ax.axhline(y=warn_upper, color='orange', linestyle=':', linewidth=1.5, 
-                   label=f'경고선 (+2σ = {warn_upper:.4f})', zorder=1)
-        ax.axhline(y=warn_lower, color='orange', linestyle=':', linewidth=1.5, 
-                   label=f'경고선 (-2σ = {warn_lower:.4f})', zorder=1)
-        
+            ax.scatter(display_data.loc[out_of_control, x_column], display_data.loc[out_of_control, 'p'],
+                       color='red', s=55, marker='o', label='관리한계 초과', zorder=4)
+
+        ax.axhline(y=p_bar, color='green', linestyle='-', linewidth=2, label=f'중심선 (P̄ = {p_bar:.4f})', zorder=1)
+        ax.axhline(y=UCL, color='red', linestyle='--', linewidth=2, label=f'UCL = {UCL:.4f}', zorder=1)
+        ax.axhline(y=LCL, color='red', linestyle='--', linewidth=2, label=f'LCL = {LCL:.4f}', zorder=1)
+        ax.axhline(y=warn_upper, color='orange', linestyle=':', linewidth=1.5, label=f'+2σ = {warn_upper:.4f}', zorder=1)
+        ax.axhline(y=warn_lower, color='orange', linestyle=':', linewidth=1.5, label=f'-2σ = {warn_lower:.4f}', zorder=1)
+
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel('불량률 (P)', fontsize=12, fontweight='bold')
         ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
         ax.legend(loc='upper right', fontsize=8, frameon=True, framealpha=0.85, borderpad=0.6, labelspacing=0.4)
         ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.8)
-
         if analysis_mode == "date":
             ax.tick_params(axis='x', rotation=45)
 
         plt.tight_layout()
-
         return fig
-    
+
     @render.plot
     def plot_xbar_chart():
         input.apply_filter()
-        
         filters = current_filters()
-        
+
         analysis_mode = filters["analysis_mode"]
         variable = filters["variable"]
         variable_label = VARIABLE_LABELS.get(variable, variable)
         mold_codes = filters["mold_codes"] or None
-        
-        baseline_overridden = False
-        baseline_note = None
 
         if analysis_mode == "date":
             date_range = filters["date_range"]
             date_start = date_range[0] if date_range else None
             date_end = date_range[1] if date_range else None
-            
             df = load_and_filter_data(date_start=date_start, date_end=date_end, mold_codes=mold_codes)
-            
-            date_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = \
-                calculate_xbar_r_chart_by_date(df, variable)
+            date_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = calculate_xbar_r_chart_by_date(df, variable)
             display_data = date_stats
             x_column = 'date_only'
             x_label = '날짜'
-            title = f'Xbar 관리도 (날짜 기반)'
+            title = 'Xbar 관리도 (날짜 기반)'
         else:
             df = load_and_filter_data(mold_codes=mold_codes)
             subgroup_size = filters["subgroup_size"]
-            
-            subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = \
-                calculate_xbar_r_chart(df, variable, subgroup_size=subgroup_size)
-            
+            subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = calculate_xbar_r_chart(df, variable, subgroup_size=subgroup_size)
             start = max(0, filters["subgroup_start"])
             end = min(len(subgroup_stats), filters["subgroup_end"])
             display_data = subgroup_stats.iloc[start:end]
@@ -1236,168 +1341,93 @@ def tab_server(input, output, session, streamer=None, shared_df: reactive.Value 
             x_label = '서브그룹 번호'
             title = f'Xbar 관리도 (서브그룹 기반, n={subgroup_size})'
 
-        # 안정상태 기준이 있으면 Xbar 관리한계를 mean±3*std로 대체
-        # mold_code가 단일 선택일 때만 적용 (여러 개면 애매하여 적용 보류)
-        if mold_codes and len(mold_codes) == 1:
-            baseline = get_baseline_for(mold_codes[0], variable)
-            if baseline and np.isfinite(baseline["mean"]) and np.isfinite(baseline["std"]):
-                mean0 = baseline["mean"]
-                std0 = max(float(baseline["std"]), 1e-12)
-                xbar_bar = float(mean0)
-                UCL_xbar = float(mean0 + 3.0 * std0)
-                LCL_xbar = float(mean0 - 3.0 * std0)
-                baseline_overridden = True
-                baseline_note = f"(안정기준 적용: μ={mean0:.4f}, σ={std0:.4f})"
-
         fig, ax = plt.subplots(figsize=(14, 6))
-        
+
         warn_upper_xbar = xbar_bar + (UCL_xbar - xbar_bar) * 2/3
         warn_lower_xbar = xbar_bar - (xbar_bar - LCL_xbar) * 2/3
-        
         out_of_control_xbar = (display_data['mean'] > UCL_xbar) | (display_data['mean'] < LCL_xbar)
-        
-        ax.plot(display_data[x_column], display_data['mean'],
-                color='#2E86AB', linewidth=2, linestyle='-', zorder=2)
-        
-        ax.scatter(display_data.loc[~out_of_control_xbar, x_column], 
-                  display_data.loc[~out_of_control_xbar, 'mean'],
-                  color='#2E86AB', s=45, marker='o',
-                  label='Xbar (평균)', zorder=3)
-        
+
+        ax.plot(display_data[x_column], display_data['mean'], color='#2E86AB', linewidth=2, linestyle='-', zorder=2)
+        ax.scatter(display_data.loc[~out_of_control_xbar, x_column], display_data.loc[~out_of_control_xbar, 'mean'],
+                   color='#2E86AB', s=45, marker='o', label='Xbar (평균)', zorder=3)
         if out_of_control_xbar.any():
-            ax.scatter(display_data.loc[out_of_control_xbar, x_column], 
-                      display_data.loc[out_of_control_xbar, 'mean'],
-                      color='red', s=55, marker='o',
-                      label='관리한계 초과', zorder=4)
-        
-        ax.axhline(y=xbar_bar, color='green', linestyle='-', linewidth=2, 
-                   label=f'중심선 (X̿ = {xbar_bar:.4f})', zorder=1)
-        
-        ax.axhline(y=UCL_xbar, color='red', linestyle='--', linewidth=2, 
-                   label=f'상한 관리한계선 (UCL = {UCL_xbar:.4f})', zorder=1)
-        
-        ax.axhline(y=LCL_xbar, color='red', linestyle='--', linewidth=2, 
-                   label=f'하한 관리한계선 (LCL = {LCL_xbar:.4f})', zorder=1)
-        
-        ax.axhline(y=warn_upper_xbar, color='orange', linestyle=':', linewidth=1.5, 
-                   label=f'경고선 (+2σ = {warn_upper_xbar:.4f})', zorder=1)
-        ax.axhline(y=warn_lower_xbar, color='orange', linestyle=':', linewidth=1.5, 
-                   label=f'경고선 (-2σ = {warn_lower_xbar:.4f})', zorder=1)
-        
+            ax.scatter(display_data.loc[out_of_control_xbar, x_column], display_data.loc[out_of_control_xbar, 'mean'],
+                       color='red', s=55, marker='o', label='관리한계 초과', zorder=4)
+
+        ax.axhline(y=xbar_bar, color='green', linestyle='-', linewidth=2, label=f'X̿ = {xbar_bar:.4f}', zorder=1)
+        ax.axhline(y=UCL_xbar, color='red', linestyle='--', linewidth=2, label=f'UCL = {UCL_xbar:.4f}', zorder=1)
+        ax.axhline(y=LCL_xbar, color='red', linestyle='--', linewidth=2, label=f'LCL = {LCL_xbar:.4f}', zorder=1)
+        ax.axhline(y=warn_upper_xbar, color='orange', linestyle=':', linewidth=1.5, label=f'+2σ = {warn_upper_xbar:.4f}', zorder=1)
+        ax.axhline(y=warn_lower_xbar, color='orange', linestyle=':', linewidth=1.5, label=f'-2σ = {warn_lower_xbar:.4f}', zorder=1)
+
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel(f'{variable_label} - 평균', fontsize=12, fontweight='bold')
-        if baseline_overridden and baseline_note:
-            ax.set_title(f"{title} {baseline_note}", fontsize=14, fontweight='bold', pad=20)
-        else:
-            ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-        ax.legend(
-            loc='upper center',
-            bbox_to_anchor=(0.5, -0.22),
-            ncol=3,
-            fontsize=8,
-            frameon=False,
-            handlelength=2.5,
-            columnspacing=1.5
-        )
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.22), ncol=3, fontsize=8, frameon=False, handlelength=2.5, columnspacing=1.5)
         ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.8)
-
         if analysis_mode == "date":
             ax.tick_params(axis='x', rotation=45)
 
         fig.subplots_adjust(left=0.08, right=0.97, top=0.9, bottom=0.28)
-
         return fig
-    
+
     @render.plot
     def plot_r_chart():
         input.apply_filter()
-        
         filters = current_filters()
 
         analysis_mode = filters["analysis_mode"]
         variable = filters["variable"]
         variable_label = VARIABLE_LABELS.get(variable, variable)
         mold_codes = filters["mold_codes"] or None
-        
+
         if analysis_mode == "date":
             date_range = filters["date_range"]
             date_start = date_range[0] if date_range else None
             date_end = date_range[1] if date_range else None
-            
             df = load_and_filter_data(date_start=date_start, date_end=date_end, mold_codes=mold_codes)
-            
-            date_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = \
-                calculate_xbar_r_chart_by_date(df, variable)
+            date_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = calculate_xbar_r_chart_by_date(df, variable)
             display_data = date_stats
             x_column = 'date_only'
             x_label = '날짜'
-            title = f'R 관리도 (날짜 기반)'
+            title = 'R 관리도 (날짜 기반)'
         else:
             df = load_and_filter_data(mold_codes=mold_codes)
             subgroup_size = filters["subgroup_size"]
-            
-            subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = \
-                calculate_xbar_r_chart(df, variable, subgroup_size=subgroup_size)
-            
+            subgroup_stats, xbar_bar, r_bar, UCL_xbar, LCL_xbar, UCL_r, LCL_r = calculate_xbar_r_chart(df, variable, subgroup_size=subgroup_size)
             start = max(0, filters["subgroup_start"])
             end = min(len(subgroup_stats), filters["subgroup_end"])
             display_data = subgroup_stats.iloc[start:end]
             x_column = 'subgroup'
             x_label = '서브그룹 번호'
             title = f'R 관리도 (서브그룹 기반, n={subgroup_size})'
-        
+
         fig, ax = plt.subplots(figsize=(14, 6))
-        
+
         warn_upper_r = r_bar + (UCL_r - r_bar) * 2/3
         warn_lower_r = r_bar - (r_bar - LCL_r) * 2/3
-        
         out_of_control_r = (display_data['range'] > UCL_r) | (display_data['range'] < LCL_r)
-        
-        ax.plot(display_data[x_column], display_data['range'],
-                color="#2E86AB", linewidth=2, linestyle='-', zorder=2)
-        
-        ax.scatter(display_data.loc[~out_of_control_r, x_column],
-                  display_data.loc[~out_of_control_r, 'range'],
-                  color='#2E86AB', s=45, marker='o',
-                  label='R (범위)', zorder=3)
-        
+
+        ax.plot(display_data[x_column], display_data['range'], color="#2E86AB", linewidth=2, linestyle='-', zorder=2)
+        ax.scatter(display_data.loc[~out_of_control_r, x_column], display_data.loc[~out_of_control_r, 'range'],
+                   color='#2E86AB', s=45, marker='o', label='R (범위)', zorder=3)
         if out_of_control_r.any():
-            ax.scatter(display_data.loc[out_of_control_r, x_column],
-                      display_data.loc[out_of_control_r, 'range'],
-                      color='red', s=55, marker='o',
-                      label='관리한계 초과', zorder=4)
-        
-        ax.axhline(y=r_bar, color='green', linestyle='-', linewidth=2, 
-                   label=f'중심선 (R̄ = {r_bar:.4f})', zorder=1)
-        
-        ax.axhline(y=UCL_r, color='red', linestyle='--', linewidth=2, 
-                   label=f'상한 관리한계선 (UCL = {UCL_r:.4f})', zorder=1)
-        
-        ax.axhline(y=LCL_r, color='red', linestyle='--', linewidth=2, 
-                   label=f'하한 관리한계선 (LCL = {LCL_r:.4f})', zorder=1)
-        
-        ax.axhline(y=warn_upper_r, color='orange', linestyle=':', linewidth=1.5, 
-                   label=f'경고선 (+2σ = {warn_upper_r:.4f})', zorder=1)
-        ax.axhline(y=warn_lower_r, color='orange', linestyle=':', linewidth=1.5, 
-                   label=f'경고선 (-2σ = {warn_lower_r:.4f})', zorder=1)
-        
+            ax.scatter(display_data.loc[out_of_control_r, x_column], display_data.loc[out_of_control_r, 'range'],
+                       color='red', s=55, marker='o', label='관리한계 초과', zorder=4)
+
+        ax.axhline(y=r_bar, color='green', linestyle='-', linewidth=2, label=f'R̄ = {r_bar:.4f}', zorder=1)
+        ax.axhline(y=UCL_r, color='red', linestyle='--', linewidth=2, label=f'UCL = {UCL_r:.4f}', zorder=1)
+        ax.axhline(y=LCL_r, color='red', linestyle='--', linewidth=2, label=f'LCL = {LCL_r:.4f}', zorder=1)
+        ax.axhline(y=warn_upper_r, color='orange', linestyle=':', linewidth=1.5, label=f'+2σ = {warn_upper_r:.4f}', zorder=1)
+        ax.axhline(y=warn_lower_r, color='orange', linestyle=':', linewidth=1.5, label=f'-2σ = {warn_lower_r:.4f}', zorder=1)
+
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel(f'{variable_label} - 범위', fontsize=12, fontweight='bold')
         ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-        ax.legend(
-            loc='upper center',
-            bbox_to_anchor=(0.5, -0.22),
-            ncol=3,
-            fontsize=8,
-            frameon=False,
-            handlelength=2.5,
-            columnspacing=1.5
-        )
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.22), ncol=3, fontsize=8, frameon=False, handlelength=2.5, columnspacing=1.5)
         ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.8)
-
         if analysis_mode == "date":
             ax.tick_params(axis='x', rotation=45)
 
         fig.subplots_adjust(left=0.08, right=0.97, top=0.9, bottom=0.28)
-
         return fig
