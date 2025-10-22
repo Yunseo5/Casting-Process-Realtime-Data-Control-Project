@@ -1,3 +1,8 @@
+# ===========================
+# modules/tab_target_operation_manager.py
+# (완성본: 피클 모델 로더 + 불량 경보 연결 + 배포 경로 최적화)
+# ===========================
+
 from shiny import ui, render, reactive
 import pandas as pd
 import numpy as np
@@ -7,7 +12,100 @@ import matplotlib
 import math
 from pathlib import Path
 import joblib
+
 matplotlib.use('Agg')
+
+# ---------- [추가] 내장 모델 로더/예측기 (app.py 수정 불필요) ----------
+import os, json, pickle, threading
+
+class _TabModel:
+    """게으른 로딩 + 싱글톤(배포 친화). 환경변수로 경로/피처 오버라이드."""
+    _inst = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._inst is None:
+            with cls._lock:
+                if cls._inst is None:
+                    cls._inst = super().__new__(cls)
+                    cls._inst._inited = False
+        return cls._inst
+
+    def __init__(self):
+        if getattr(self, "_inited", False):
+            return
+        self._model = None
+        self._feature_cols = None
+        self._inited = True
+        self._load_once()
+
+    def _load_once(self):
+        # modules/…/탭파일 → 프로젝트 루트(dashboard/)
+        here = Path(__file__).resolve().parent
+        project_root = here.parents[1]
+
+        # 기본 모델 경로: dashboard/data/models/LightGBM_v3.pkl
+        default_model = project_root / "data" / "models" / "LightGBM_v1.pkl"
+        model_path = Path(os.getenv("MODEL_PATH", default_model))
+
+        # 학습에 쓴 피처(이름/순서 동일). FEATURE_COLS_JSON로 교체 가능.
+        default_feats = [
+            "molten_temp","facility_operation_cycleTime","production_cycletime",
+            "low_section_speed","high_section_speed","molten_volume","cast_pressure",
+            "biscuit_thickness","upper_mold_temp1","upper_mold_temp2","upper_mold_temp3",
+            "lower_mold_temp1","lower_mold_temp2","lower_mold_temp3",
+            "sleeve_temperature","physical_strength","Coolant_temperature","EMS_operation_time"
+        ]
+        feats_env = os.getenv("FEATURE_COLS_JSON", "")
+        if feats_env:
+            try:
+                self._feature_cols = json.loads(feats_env)
+            except Exception as e:
+                print(f"[MODEL] FEATURE_COLS_JSON 파싱 실패 → 기본 사용: {e}")
+                self._feature_cols = default_feats
+        else:
+            self._feature_cols = default_feats
+
+        try:
+            with open(model_path, "rb") as f:
+                self._model = pickle.load(f)
+            print(f"[MODEL] loaded in tab module: {model_path}")
+        except Exception as e:
+            print(f"[MODEL] load failed: {model_path} -> {e}")
+            self._model = None
+
+    @property
+    def ready(self) -> bool:
+        return self._model is not None and bool(self._feature_cols)
+
+    def predict_row(self, row: pd.Series):
+        """row → {'prob': float} 또는 {'is_defect': bool}. 실패 시 None."""
+        if not self.ready:
+            return None
+        try:
+            x = pd.to_numeric(row.reindex(self._feature_cols), errors="coerce") \
+                    .astype(float).fillna(0.0).values.reshape(1, -1)
+            m = self._model
+            if hasattr(m, "predict_proba"):
+                prob = float(m.predict_proba(x)[0, 1])     # 1-class 확률
+                return {"prob": prob}
+            elif hasattr(m, "decision_function"):
+                score = float(m.decision_function(x)[0])
+                return {"is_defect": score > 0.0}
+            else:
+                yhat = int(m.predict(x)[0])
+                return {"is_defect": bool(yhat)}
+        except Exception as e:
+            print(f"[MODEL] predict error: {e}")
+            return None
+
+_MODEL_SINGLETON = _TabModel()
+
+def _predict_row_from_model(row: pd.Series):
+    """app.py에서 predict_row 안 넘겨주면 이 기본 훅 사용."""
+    return _MODEL_SINGLETON.predict_row(row)
+# ---------------------------------------------------------------------
+
 
 # 한글 폰트 설정
 def setup_korean_font():
@@ -78,7 +176,8 @@ LEVEL_STATUS_CLASS = {
     "no_data": "level-no_data",
 }
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+# 프로젝트 루트(dashboard/) 기준 경로
+BASE_DIR = Path(__file__).resolve().parents[1]
 BASELINE_FILE = BASE_DIR / "data" / "processed" / "train_v1_time.csv"
 # ★ test 예측파일(라벨 포함) 경로 - 선적재는 하지 않고, 실시간 매칭에만 사용
 TEST_PRED_FILE = BASE_DIR / "data" / "intermin" / "test_predictions_v2.csv"
@@ -578,7 +677,7 @@ def initialize_yield_from_train():
 
 initialize_yield_from_train()
 
-# ✅ test_predictions_v1.csv 의 passorfail 매핑(선적재 X, 실시간 매칭에만 사용)
+# ✅ test_predictions_v2.csv 의 passorfail 매핑(선적재 X, 실시간 매칭에만 사용)
 TEST_LABEL_MAP: dict[str, int] = {}
 def _load_test_label_map():
     global TEST_LABEL_MAP
@@ -588,7 +687,6 @@ def _load_test_label_map():
             print(f"[test 라벨] 파일 없음: {TEST_PRED_FILE}")
             return
         tdf = pd.read_csv(TEST_PRED_FILE)
-        # 지문 생성에 필요한 주요 키가 없을 수 있으므로, 있는 컬럼만 사용
         for _, r in tdf.iterrows():
             try:
                 fp = _row_fingerprint(r)
@@ -618,6 +716,9 @@ def tab_server(
     proba_thresh: float = 0.5,          # 임계값
     predict_latest_for_code=None,       # [신규] 코드별 최신 예측 함수
 ):
+    # --- [추가] app.py가 훅을 안 넘기면, 모듈 내장 모델 사용 ---
+    if predict_row is None:
+        predict_row = _predict_row_from_model
 
     _last_rows = {"n": 0, "last_fp": None}
     yield_tick = reactive.Value(0)
@@ -649,7 +750,7 @@ def tab_server(
             mcode = str(row.get("mold_code", "unknown"))
             outcome = None
 
-            # --- (1) test_predictions_v1.csv 라벨 매칭이 최우선 ---
+            # --- (1) test_predictions 매칭이 최우선 ---
             try:
                 fp = _row_fingerprint(row)
                 if fp and fp in TEST_LABEL_MAP:
@@ -657,7 +758,7 @@ def tab_server(
             except Exception:
                 pass
 
-            # --- (2) 매칭 실패 시, 기존 우선순위로 모델 예측값 사용 ---
+            # --- (2) fallback: 기존 라벨/예측/확률/모델 ---
             if outcome is None and "passorfail" in row.index and pd.notna(row["passorfail"]):
                 try:
                     v = int(pd.to_numeric(row["passorfail"], errors="coerce"))
@@ -766,35 +867,32 @@ def tab_server(
     @render.ui
     def kpi_uptime():
         df = shared_df.get()
-        # 기본 유효성 체크
         if (
             df is None or df.empty or
             'facility_operation_cycleTime' not in df.columns or
             'production_cycletime' not in df.columns
         ):
             return ui.h1("0.0%", class_="kpi-value")
-    
-        # 선택된 몰드코드로 필터 (all이면 전체)
+
         selected_code = str(input.mold_code_select() or "all")
         if selected_code != "all" and 'mold_code' in df.columns:
             df = df[df['mold_code'].astype(str) == selected_code]
-    
+
         if df is None or df.empty:
             return ui.h1("0.0%", class_="kpi-value")
-    
-        # 0 나누기 방지
+
         prod_time = pd.to_numeric(df["production_cycletime"], errors="coerce").replace(0, np.nan)
         up = pd.to_numeric(df["facility_operation_cycleTime"], errors="coerce")
-    
+
         ratio = prod_time / up
         uptime = np.nanmean(ratio) * 100
         if not np.isfinite(uptime):
             uptime = 0.0
-    
+
         label = "전체" if selected_code == "all" else f"Mold {selected_code}"
         return ui.h1(f"{label}: {uptime:.1f}%", class_="kpi-value")
 
-    # === (A) 이상치 경보: 기존 로직 (shared_df 갱신마다 재계산; 선택 코드로 필터만) ===
+    # === (A) 이상치 경보: 기존 로직 ===
     @reactive.calc
     def anomaly_summary():
         df = shared_df.get()
@@ -1241,4 +1339,3 @@ def tab_server(
             pad = pd.DataFrame([[None] * len(result.columns)] * (10 - len(result)), columns=result.columns)
             result = pd.concat([result, pad], ignore_index=True)
         return render.DataGrid(result, width="100%", filters=False, row_selection_mode="none")
-###
