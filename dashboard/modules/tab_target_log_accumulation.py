@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 # ========== 상수 정의 ==========
 @dataclass
 class Config:
-    BASE_DIR: Path = Path(__file__).resolve().parents[2]
+    BASE_DIR: Path = Path(__file__).resolve().parents[1]
     MODEL_PATH: Path = BASE_DIR / "data" / "models" / "LightGBM_v1.pkl"
-    PROCESS_IMAGE_PATH: Path = BASE_DIR / "data" / "illustration" / "Casting_process_illustration.png"
+    PROCESS_IMAGE_PATH: Path = BASE_DIR / "illustration" / "Casting_process_illustration.png"
     DROP_COLUMNS: List[str] = None
     DEFAULT_THRESHOLD: float = 0.7553
     PERCENTILE_LOW: float = 0.01
@@ -41,6 +41,7 @@ class Config:
     
     def __post_init__(self):
         self.DROP_COLUMNS = ['line', 'name', 'mold_name', 'date', 'time', 'Unnamed: 0', 'id']
+
 config = Config()
 
 # ========== 공정 프로세스 매핑 ==========
@@ -86,15 +87,39 @@ COLUMN_NAMES_KR = {
     "Cycle_diff": "사이클 시간 차이"
 }
 
-# ========== 한글 폰트 설정 ==========
-def setup_korean_font() -> None:
-    available_fonts = {f.name for f in fm.fontManager.ttflist}
-    korean_fonts = ['Noto Sans KR', 'Noto Sans CJK KR', 'NanumGothic', 'AppleGothic', 'Malgun Gothic']
-    chosen = next((f for f in korean_fonts if f in available_fonts), None)
-    plt.rcParams['font.family'] = [chosen, 'DejaVu Sans'] if chosen else ['DejaVu Sans']
-    plt.rcParams['axes.unicode_minus'] = True
+# ========== 한글 폰트 설정 (OTF 전용) ==========
+def setup_korean_font_otf_only() -> None:
+    """
+    번들된 OTF만 사용. 성공 시 해당 family를 전역 기본 폰트로 지정.
+    실패하면 경고만 남기고(DejaVu 유지) 계속 진행.
+    """
+    try:
+        base_dir = config.BASE_DIR  # 프로젝트 루트 (dashboard/)
+        otf_candidates = [
+            base_dir / "assets" / "fonts" / "NanumGothic.otf",
+            base_dir / "assets" / "fonts" / "NotoSansKR-Regular.otf",
+        ]
+        for fp in otf_candidates:
+            if fp.exists():
+                fm.fontManager.addfont(str(fp))
+                try:
+                    fm._load_fontmanager(try_read_cache=False)  # 캐시 리로드
+                except Exception:
+                    pass
+                family = fm.FontProperties(fname=str(fp)).get_name()
+                plt.rcParams["font.family"] = family
+                plt.rcParams["font.sans-serif"] = [family]
+                plt.rcParams["axes.unicode_minus"] = False
+                # 실제 사용 가능 확인
+                fm.findfont(family, fallback_to_default=False)
+                print(f"[FONT] Using bundled OTF: {fp} -> family='{family}'")
+                return
+        print("[FONT] No bundled OTF found or not usable. Korean may break.")
+    except Exception as e:
+        print(f"[FONT] OTF load failed: {e}")
 
-setup_korean_font()
+# 앱 시작 시 1회 적용
+setup_korean_font_otf_only()
 
 # ========== 모델 클래스 ==========
 class DefectPredictionModel:
@@ -320,7 +345,9 @@ class MetadataCreator:
     @staticmethod
     def create_metadata(df: pd.DataFrame) -> None:
         metadata = {}
-        heuristic_categorical = [col for col in df.columns if str(col).lower() in ["mold_code", "mold", "code", "model_code"] or (pd.api.types.is_integer_dtype(df[col]) and df[col].nunique(dropna=True) <= 20)]
+        heuristic_categorical = [col for col in df.columns
+                                 if str(col).lower() in ["mold_code", "mold", "code", "model_code"]
+                                 or (pd.api.types.is_integer_dtype(df[col]) and df[col].nunique(dropna=True) <= 20)]
         cat_set = set(model_manager.ui_categorical_cols) | set(heuristic_categorical)
         num_set = set(model_manager.ui_numeric_cols) - set(heuristic_categorical)
         for col in cat_set:
@@ -369,9 +396,18 @@ class SHAPAnalyzer:
             return None
         try:
             from shap import Explanation
-            expected_value = float(model_manager.explainer.expected_value[1] if isinstance(model_manager.explainer.expected_value, (list, np.ndarray)) else model_manager.explainer.expected_value)
+            expected_value = float(
+                model_manager.explainer.expected_value[1]
+                if isinstance(model_manager.explainer.expected_value, (list, np.ndarray))
+                else model_manager.explainer.expected_value
+            )
             shap_values = np.array([float(contributions.get(col, 0.0)) for col in model_manager.model_required_cols], dtype=float)
-            feature_values = np.array([np.nan if pd.isna(val := input_row.get(col, np.nan)) else (val[0] if isinstance(val, (list, tuple)) and len(val) > 0 else (str(val) if isinstance(val, (pd.Timestamp, pd.Timedelta)) else val)) for col in model_manager.model_required_cols], dtype=object)
+            feature_values = np.array([
+                np.nan if pd.isna(val := input_row.get(col, np.nan))
+                else (val[0] if isinstance(val, (list, tuple)) and len(val) > 0
+                      else (str(val) if isinstance(val, (pd.Timestamp, pd.Timedelta)) else val))
+                for col in model_manager.model_required_cols
+            ], dtype=object)
             feature_names = [COLUMN_NAMES_KR.get(col, col) for col in model_manager.model_required_cols]
             return Explanation(values=shap_values, base_values=expected_value, data=feature_values, feature_names=feature_names)
         except Exception as e:
@@ -427,7 +463,12 @@ class RecommendationEngine:
     
     @staticmethod
     def find_normal_range_multi(base_row: Dict, features: List[str]) -> Tuple[Optional[Dict], Dict, Optional[float], str]:
-        usable = {feat: [float(bounds[0]), float(bounds[1])] for feat in features if (bounds := model_manager.numeric_feature_ranges.get(feat)) and np.isfinite(bounds[0]) and np.isfinite(bounds[1]) and bounds[0] < bounds[1]}
+        usable = {
+            feat: [float(bounds[0]), float(bounds[1])]
+            for feat in features
+            if (bounds := model_manager.numeric_feature_ranges.get(feat))
+            and np.isfinite(bounds[0]) and np.isfinite(bounds[1]) and bounds[0] < bounds[1]
+        }
         if not usable:
             return None, {}, None, "no-features"
         best_solution = None
@@ -546,7 +587,17 @@ def predict_with_shap(row_dict: Dict) -> Optional[Dict]:
             for feat, contrib in items:
                 top_features.append({"name": feat, "label": COLUMN_NAMES_KR.get(feat, feat), "value": row_dict.get(feat, np.nan), "contribution": contrib})
         recommendations = recommendation_engine.recommend_ranges(row_dict, [item["name"] for item in top_features])
-        return {"probability": probability, "prediction": prediction, "forced_fail": forced_fail, "contributions": contributions, "shap_vector": shap_vector, "explanation": explanation, "top_features": top_features, "recommendations": recommendations, "input_row": row_dict}
+        return {
+            "probability": probability,
+            "prediction": prediction,
+            "forced_fail": forced_fail,
+            "contributions": contributions,
+            "shap_vector": shap_vector,
+            "explanation": explanation,
+            "top_features": top_features,
+            "recommendations": recommendations,
+            "input_row": row_dict
+        }
     except Exception as e:
         logger.error(f"SHAP 예측 실패: {e}")
         return None
@@ -555,11 +606,47 @@ def predict_with_shap(row_dict: Dict) -> Optional[Dict]:
 tab_ui = ui.page_fluid(
     ui.div(
         ui.div(ui.output_ui("tab_log_stats"), style="background:#fff;border-radius:12px;padding:20px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)"),
-        ui.div(ui.accordion(ui.accordion_panel(ui.HTML('<i class="fa-solid fa-exclamation-circle"></i> 누적 데이터 (불량)'), ui.output_ui("tab_log_table_defect_wrapper"), value="defect_panel"), id="data_accordion_1", open=True, multiple=True), style="background:#fff;border-radius:16px;padding:20px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)"),
-        ui.div(ui.div(ui.HTML('<i class="fa-solid fa-chart-bar"></i> SHAP 변수 영향도 측정'), style="font-size:18px;font-weight:700;color:#2A2D30;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #2A2D30"), ui.output_ui("shap_info_message"), ui.div(ui.div(ui.output_plot("shap_waterfall_plot", height="550px"), style="flex:7;min-width:0"), ui.div(ui.output_ui("shap_analysis_details"), style="flex:3;min-width:0;padding-left:20px;max-height:550px;overflow-y:auto"), style="display:flex;gap:20px;align-items:flex-start"), style="background:#fff;border-radius:16px;padding:24px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)"),
-        ui.div(ui.div(ui.HTML('<i class="fa-solid fa-industry"></i> 공정 프로세스 모니터링'), style="font-size:18px;font-weight:700;color:#2A2D30;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #2A2D30"), ui.output_ui("process_diagram"), style="background:#fff;border-radius:16px;padding:24px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.08);min-height:650px"),
-        ui.div(ui.accordion(ui.accordion_panel(ui.HTML('<i class="fa-solid fa-table-list"></i> 누적 데이터 (전체)'), ui.output_ui("tab_log_table_all_wrapper"), value="all_panel"), id="data_accordion_2", open=False, multiple=True), style="background:#fff;border-radius:16px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)"),
-        style="max-width:1400px;margin:0 auto;padding:20px 0"),
+        ui.div(
+            ui.accordion(
+                ui.accordion_panel(
+                    ui.HTML('<i class="fa-solid fa-exclamation-circle"></i> 누적 데이터 (불량) - 로그를 더블 클릭하세요.'),
+                    ui.output_ui("tab_log_table_defect_wrapper"),
+                    value="defect_panel"
+                ),
+                id="data_accordion_1", open=True, multiple=True
+            ),
+            style="background:#fff;border-radius:16px;padding:20px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)"
+        ),
+        ui.div(
+            ui.div(ui.HTML('<i class="fa-solid fa-chart-bar"></i> SHAP 변수 영향도 측정'),
+                   style="font-size:18px;font-weight:700;color:#2A2D30;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #2A2D30"),
+            ui.output_ui("shap_info_message"),
+            ui.div(
+                ui.div(ui.output_plot("shap_waterfall_plot", height="550px"), style="flex:7;min-width:0"),
+                ui.div(ui.output_ui("shap_analysis_details"), style="flex:3;min-width:0;padding-left:20px;max-height:550px;overflow-y:auto"),
+                style="display:flex;gap:20px;align-items:flex-start"
+            ),
+            style="background:#fff;border-radius:16px;padding:24px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)"
+        ),
+        ui.div(
+            ui.div(ui.HTML('<i class="fa-solid fa-industry"></i> 공정 프로세스 모니터링'),
+                   style="font-size:18px;font-weight:700;color:#2A2D30;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #2A2D30"),
+            ui.output_ui("process_diagram"),
+            style="background:#fff;border-radius:16px;padding:24px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,.08);min-height:650px"
+        ),
+        ui.div(
+            ui.accordion(
+                ui.accordion_panel(
+                    ui.HTML('<i class="fa-solid fa-table-list"></i> 누적 데이터 (전체)'),
+                    ui.output_ui("tab_log_table_all_wrapper"),
+                    value="all_panel"
+                ),
+                id="data_accordion_2", open=False, multiple=True
+            ),
+            style="background:#fff;border-radius:16px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.08)"
+        ),
+        style="max-width:1400px;margin:0 auto;padding:20px 0"
+    ),
 )
 
 def tab_server(input, output, session, streamer, shared_df, streaming_active):
@@ -578,7 +665,17 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
             temp_df['passorfail'] = predictions
             range_updater.update_ranges(temp_df)
             metadata_creator.create_metadata(df)
-            return ui.div(ui.div(ui.div(ui.HTML(f'<i class="fa-solid fa-list-ol"></i> 총 데이터 행: <strong>{len(df):,}</strong>'), style="font-weight:600;font-size:16px;color:#2c3e50"), ui.div(ui.HTML(f'<i class="fa-solid fa-memory"></i> 메모리 사용량: <strong>{df.memory_usage(deep=True).sum() / 1024:.2f} KB</strong>'), style="font-weight:600;font-size:16px;color:#2c3e50"), ui.div(ui.HTML(f'<i class="fa-solid fa-exclamation-triangle"></i> 불량 건수: <strong>{int(predictions.sum()):,}</strong>'), style="font-weight:600;font-size:16px;color:#e74c3c"), style="display:flex;gap:360px;align-items:center;justify-content:flex-start"))
+            return ui.div(
+                ui.div(
+                    ui.div(ui.HTML(f'<i class="fa-solid fa-list-ol"></i> 총 데이터 행: <strong>{len(df):,}</strong>'),
+                           style="font-weight:600;font-size:16px;color:#2c3e50"),
+                    ui.div(ui.HTML(f'<i class="fa-solid fa-memory"></i> 메모리 사용량: <strong>{df.memory_usage(deep=True).sum() / 1024:.2f} KB</strong>'),
+                           style="font-weight:600;font-size:16px;color:#2c3e50"),
+                    ui.div(ui.HTML(f'<i class="fa-solid fa-exclamation-triangle"></i> 불량 건수: <strong>{int(predictions.sum()):,}</strong>'),
+                           style="font-weight:600;font-size:16px;color:#e74c3c"),
+                    style="display:flex;gap:360px;align-items:center;justify-content:flex-start"
+                )
+            )
         except Exception as e:
             logger.error(f"통계 계산 오류: {e}")
             return ui.div("통계 계산 오류", style="color:#dc3545")
@@ -588,8 +685,12 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
     def tab_log_table_all_wrapper():
         df = shared_df.get()
         if df.empty:
-            return ui.div(ui.div("⏳ 데이터를 불러오는 중...", style="text-align:center;padding:40px;color:#666"), style="width:100%;border:1px solid #e0e0e0;border-radius:8px;background:#f9f9f9")
-        return ui.div(ui.output_data_frame("tab_log_table_all"), style="width:100%;overflow:auto;border:1px solid #e0e0e0;border-radius:8px;height:300px")
+            return ui.div(
+                ui.div("⏳ 데이터를 불러오는 중...", style="text-align:center;padding:40px;color:#666"),
+                style="width:100%;border:1px solid #e0e0e0;border-radius:8px;background:#f9f9f9"
+            )
+        return ui.div(ui.output_data_frame("tab_log_table_all"),
+                      style="width:100%;overflow:auto;border:1px solid #e0e0e0;border-radius:8px;height:300px")
     
     @output
     @render.data_frame
@@ -613,8 +714,12 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
     def tab_log_table_defect_wrapper():
         df = shared_df.get()
         if df.empty:
-            return ui.div(ui.div("⏳ 데이터를 불러오는 중...", style="text-align:center;padding:40px;color:#666"), style="width:100%;border:1px solid #e0e0e0;border-radius:8px;background:#f9f9f9")
-        return ui.div(ui.output_data_frame("tab_log_table_defect"), style="width:100%;overflow:auto;border:1px solid #e0e0e0;border-radius:8px;height:300px")
+            return ui.div(
+                ui.div("⏳ 데이터를 불러오는 중...", style="text-align:center;padding:40px;color:#666"),
+                style="width:100%;border:1px solid #e0e0e0;border-radius:8px;background:#f9f9f9"
+            )
+        return ui.div(ui.output_data_frame("tab_log_table_defect"),
+                      style="width:100%;overflow:auto;border:1px solid #e0e0e0;border-radius:8px;height:300px")
     
     @output
     @render.data_frame
@@ -639,7 +744,6 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
     def _handle_defect_row_selection():
         try:
             selected = input.tab_log_table_defect_selected_rows()
-            # 선택이 없으면 기존 분석 결과 유지 (초기화하지 않음)
             if not selected:
                 return
             df = shared_df.get()
@@ -665,12 +769,26 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
         prob = result['probability']
         pred_label = "불량" if result['prediction'] == 1 else "정상"
         pred_color = "#dc3545" if pred_label == "불량" else "#28a745"
-        forced_msg = '<div style="background:#fff3cd;border-left:4px solid #ffc107;padding:12px;margin-top:10px;border-radius:4px;">⚠️ <strong>tryshot_signal 규칙 적용</strong><br><span style="font-size:12px;color:#6c757d;">※ 추천 탐색 중에는 강제불량을 일시 무시합니다.</span></div>' if result['forced_fail'] else ''
-        return ui.HTML(f'<div style="background:#f8f9fa;padding:20px;border-radius:8px;margin-bottom:20px;"><div style="font-size:24px;font-weight:700;color:{pred_color};margin-bottom:15px;">{pred_label}</div><div style="font-size:15px;margin-bottom:8px;">불량 확률: <strong style="font-size:18px;color:#dc3545;">{prob:.4f}</strong> (임계값: {model_manager.threshold:.4f})</div>{forced_msg}</div>')
+        forced_msg = (
+            '<div style="background:#fff3cd;border-left:4px solid #ffc107;padding:12px;margin-top:10px;border-radius:4px;">'
+            '⚠️ <strong>tryshot_signal 규칙 적용</strong><br>'
+            '<span style="font-size:12px;color:#6c757d;">※ 추천 탐색 중에는 강제불량을 일시 무시합니다.</span></div>'
+            if result['forced_fail'] else ''
+        )
+        return ui.HTML(
+            f'<div style="background:#f8f9fa;padding:20px;border-radius:8px;margin-bottom:20px;">'
+            f'<div style="font-size:24px;font-weight:700;color:{pred_color};margin-bottom:15px;">{pred_label}</div>'
+            f'<div style="font-size:15px;margin-bottom:8px;">불량 확률: '
+            f'<strong style="font-size:18px;color:#dc3545;">{prob:.4f}</strong> '
+            f'(임계값: {model_manager.threshold:.4f})</div>{forced_msg}</div>'
+        )
     
     @output
     @render.plot
     def shap_waterfall_plot():
+        # 워터폴 렌더 직전에도 OTF 폰트 재적용 (matplotlib 내부 상태 초기화 대비)
+        setup_korean_font_otf_only()
+
         result = analysis_result.get()
         fig, ax = plt.subplots(figsize=(8, 6))
         if result is None or (explanation := result.get('explanation')) is None:
@@ -681,7 +799,7 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
             return fig
         try:
             plt.close('all')
-            setup_korean_font()
+            setup_korean_font_otf_only()
             shap.plots.waterfall(explanation, max_display=20, show=False)
             fig = plt.gcf()
             fig.set_size_inches(8, 6)
@@ -709,31 +827,85 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
             contrib = item.get("contribution", 0.0)
             direction = "위험 증가" if contrib > 0 else "위험 감소"
             color = "#dc3545" if contrib > 0 else "#28a745"
-            item_html = f'<li style="margin-bottom:14px;"><div style="display:flex;align-items:center;gap:6px;"><span style="background:#2A2D30;color:white;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">{rank}</span><strong style="font-size:14px;">{item["label"]}</strong></div><div style="margin-left:28px;margin-top:3px;"><span style="color:#6c757d;font-size:12px;">현재 값: {val}</span><br>'
+            item_html = (
+                f'<li style="margin-bottom:14px;">'
+                f'<div style="display:flex;align-items:center;gap:6px;">'
+                f'<span style="background:#2A2D30;color:white;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">{rank}</span>'
+                f'<strong style="font-size:14px;">{item["label"]}</strong></div>'
+                f'<div style="margin-left:28px;margin-top:3px;"><span style="color:#6c757d;font-size:12px;">현재 값: {val}</span><br>'
+            )
             if rec := recommendations.get(feat_name, {}):
                 if rec.get("type") == "numeric":
                     min_v, max_v = format_value(rec.get("min")), format_value(rec.get("max"))
                     status = rec.get("status")
-                    item_html += f'<span style="color:{"#856404" if status == "no-normal-but-best" else "#28a745"};font-weight:600;font-size:12px;">{"• 정상 전환 불가, 확률 최소화 후보" if status == "no-normal-but-best" else "✓ 정상 전환 추천"}: {min_v} ~ {max_v}</span><br>'
+                    item_html += (
+                        f'<span style="color:{"#856404" if status == "no-normal-but-best" else "#28a745"};font-weight:600;font-size:12px;">'
+                        f'{"• 정상 전환 불가, 확률 최소화 후보" if status == "no-normal-but-best" else "✓ 정상 전환 추천"}: {min_v} ~ {max_v}</span><br>'
+                    )
                 elif rec.get("type") == "categorical":
                     values = ", ".join(rec.get("values", []))
                     status = rec.get("status")
-                    item_html += f'<span style="color:{"#856404" if status == "no-normal-but-best" else "#28a745"};font-weight:600;font-size:12px;">{"• 정상 전환 불가, 확률 최소화 후보" if status == "no-normal-but-best" else "✓ 정상 전환 추천 값"}: {values}</span><br>'
-            item_html += f'<span style="font-size:12px;">SHAP 기여도: </span><span style="color:{color};font-weight:600;font-size:13px;">{contrib:+.4f}</span> <span style="color:#6c757d;font-size:11px;">({direction})</span></div></li>'
+                    item_html += (
+                        f'<span style="color:{"#856404" if status == "no-normal-but-best" else "#28a745"};font-weight:600;font-size:12px;">'
+                        f'{"• 정상 전환 불가, 확률 최소화 후보" if status == "no-normal-but-best" else "✓ 정상 전환 추천 값"}: {values}</span><br>'
+                    )
+            item_html += (
+                f'<span style="font-size:12px;">SHAP 기여도: </span>'
+                f'<span style="color:{color};font-weight:600;font-size:13px;">{contrib:+.4f}</span> '
+                f'<span style="color:#6c757d;font-size:11px;">({direction})</span></div></li>'
+            )
             items.append(item_html)
-        prob_html = f'<div style="background:#d4edda;border-left:4px solid #28a745;padding:10px;margin-top:14px;border-radius:4px;"><strong style="font-size:13px;">📈 추천 적용 시 예상 불량 확률(최소): {best_prob:.4f}</strong></div>' if (best_prob := recommendations.get("best_probability")) is not None else ""
-        return ui.HTML(f'<div style="background:#f8f9fa;padding:18px;border-radius:8px;height:100%;"><div style="font-weight:600;font-size:15px;margin-bottom:14px;border-bottom:2px solid #dee2e6;padding-bottom:7px;">📊 불량 영향 상위 변수 및 정상/최소확률 전환 권고</div><ul style="padding-left:18px;margin:0;">{"".join(items)}</ul>{prob_html}</div>')
+        prob_html = (
+            f'<div style="background:#d4edda;border-left:4px solid #28a745;padding:10px;margin-top:14px;border-radius:4px;">'
+            f'<strong style="font-size:13px;">📈 추천 적용 시 예상 불량 확률(최소): {best_prob:.4f}</strong></div>'
+            if (best_prob := recommendations.get("best_probability")) is not None else ""
+        )
+        return ui.HTML(
+            f'<div style="background:#f8f9fa;padding:18px;border-radius:8px;height:100%;">'
+            f'<div style="font-weight:600;font-size:15px;margin-bottom:14px;border-bottom:2px solid #dee2e6;padding-bottom:7px;">'
+            f'📊 불량 영향 상위 변수 및 정상/최소확률 전환 권고</div><ul style="padding-left:18px;margin:0;">{"".join(items)}</ul>{prob_html}</div>'
+        )
     
     @output
     @render.ui
     def process_diagram():
         if (result := analysis_result.get()) is None:
-            return ui.div(ui.div("⏳ 불량 행을 선택하면 공정 프로세스 상태가 표시됩니다.", style="text-align:center;padding:60px;color:#999;font-size:14px"), style="position:relative;width:100%;height:600px;background:#f8f9fa;border-radius:8px")
+            return ui.div(
+                ui.div("⏳ 불량 행을 선택하면 공정 프로세스 상태가 표시됩니다.", style="text-align:center;padding:60px;color:#999;font-size:14px"),
+                style="position:relative;width:100%;height:600px;background:#f8f9fa;border-radius:8px"
+            )
         contributions = result.get('contributions', {})
-        legend_html = '<div style="background:#f8f9fa;padding:12px;border-radius:8px;margin-bottom:16px;border:1px solid #dee2e6;display:flex;gap:20px;align-items:center;justify-content:center;"><div style="font-weight:600;color:#2c3e50;margin-right:10px;">신호등 색상 기준:</div><div style="display:flex;align-items:center;gap:6px;"><div style="width:14px;height:14px;border-radius:50%;background:#dc3545;border:2px solid #333;"></div><span style="font-size:13px;color:#2c3e50;">빨간불 (SHAP > 0.15)</span></div><div style="display:flex;align-items:center;gap:6px;"><div style="width:14px;height:14px;border-radius:50%;background:#ffc107;border:2px solid #333;"></div><span style="font-size:13px;color:#2c3e50;">노란불 (SHAP > 0.05)</span></div><div style="display:flex;align-items:center;gap:6px;"><div style="width:14px;height:14px;border-radius:50%;background:#28a745;border:2px solid #333;"></div><span style="font-size:13px;color:#2c3e50;">초록불 (정상)</span></div></div>'
+        legend_html = (
+            '<div style="background:#f8f9fa;padding:12px;border-radius:8px;margin-bottom:16px;'
+            'border:1px solid #dee2e6;display:flex;gap:20px;align-items:center;justify-content:center;">'
+            '<div style="font-weight:600;color:#2c3e50;margin-right:10px;">신호등 색상 기준:</div>'
+            '<div style="display:flex;align-items:center;gap:6px;">'
+            '<div style="width:14px;height:14px;border-radius:50%;background:#dc3545;border:2px solid #333;"></div>'
+            '<span style="font-size:13px;color:#2c3e50;">빨간불 (SHAP > 0.15)</span></div>'
+            '<div style="display:flex;align-items:center;gap:6px;">'
+            '<div style="width:14px;height:14px;border-radius:50%;background:#ffc107;border:2px solid #333;"></div>'
+            '<span style="font-size:13px;color:#2c3e50;">노란불 (SHAP > 0.05)</span></div>'
+            '<div style="display:flex;align-items:center;gap:6px;"><div style="width:14px;height:14px;border-radius:50%;'
+            'background:#28a745;border:2px solid #333;"></div><span style="font-size:13px;color:#2c3e50;">초록불 (정상)</span></div></div>'
+        )
         image_base64 = get_process_image_base64()
-        background_style = f"background:url('{image_base64}') center/contain no-repeat #f8f9fa" if image_base64 else "background:#f8f9fa"
-        accordion_style = '<style>.process-accordion{position:absolute;background:rgba(255,255,255,0.95);border:2px solid #2c3e50;border-radius:8px;min-width:200px;box-shadow:0 4px 12px rgba(0,0,0,0.15);overflow:hidden}.process-accordion summary{font-weight:700;font-size:13px;color:#2c3e50;padding:12px;text-align:center;cursor:pointer;list-style:none;user-select:none;border-bottom:2px solid #2c3e50;background:rgba(255,255,255,0.98)}.process-accordion summary::-webkit-details-marker{display:none}.process-accordion summary::after{content:"▼";float:right;font-size:10px;transition:transform 0.2s}.process-accordion[open] summary::after{transform:rotate(-180deg)}.process-accordion summary:hover{background:#f0f0f0}.process-accordion-content{padding:12px}</style>'
+        background_style = (
+            f"background:url('{image_base64}') center/contain no-repeat #f8f9fa" if image_base64
+            else "background:#f8f9fa"
+        )
+        accordion_style = (
+            '<style>'
+            '.process-accordion{position:absolute;background:rgba(255,255,255,0.95);border:2px solid #2c3e50;'
+            'border-radius:8px;min-width:200px;box-shadow:0 4px 12px rgba(0,0,0,0.15);overflow:hidden}'
+            '.process-accordion summary{font-weight:700;font-size:13px;color:#2c3e50;padding:12px;text-align:center;cursor:pointer;'
+            'list-style:none;user-select:none;border-bottom:2px solid #2c3e50;background:rgba(255,255,255,0.98)}'
+            '.process-accordion summary::-webkit-details-marker{display:none}'
+            '.process-accordion summary::after{content:"▼";float:right;font-size:10px;transition:transform 0.2s}'
+            '.process-accordion[open] summary::after{transform:rotate(-180deg)}'
+            '.process-accordion summary:hover{background:#f0f0f0}'
+            '.process-accordion-content{padding:12px}'
+            '</style>'
+        )
         process_boxes = []
         for process_name, process_info in PROCESS_MAPPING.items():
             variable_rows = []
@@ -742,7 +914,19 @@ def tab_server(input, output, session, streamer, shared_df, streaming_active):
                 shap_value = contributions.get(var, 0.0)
                 light_color = "#dc3545" if shap_value > SHAP_THRESHOLD_CRITICAL else ("#ffc107" if shap_value > SHAP_THRESHOLD_WARNING else "#28a745")
                 status_text = "위험" if light_color == "#dc3545" else ("경고" if light_color == "#ffc107" else "정상")
-                variable_rows.append(f'<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin:3px 0;background:#fff;border-radius:4px;"><span style="font-size:11px;color:#2c3e50;flex:1">{var_label}</span><div style="width:16px;height:16px;border-radius:50%;background:{light_color};border:2px solid #333;box-shadow:0 0 8px {light_color}80;margin-left:8px" title="{var_label}: {status_text} (SHAP: {shap_value:.4f})"></div></div>')
+                variable_rows.append(
+                    f'<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 8px;margin:3px 0;'
+                    f'background:#fff;border-radius:4px;"><span style="font-size:11px;color:#2c3e50;flex:1">{var_label}</span>'
+                    f'<div style="width:16px;height:16px;border-radius:50%;background:{light_color};border:2px solid #333;'
+                    f'box-shadow:0 0 8px {light_color}80;margin-left:8px" title="{var_label}: {status_text} (SHAP: {shap_value:.4f})"></div></div>'
+                )
             position = process_info["position"]
-            process_boxes.append(f'<details class="process-accordion" open style="top:{position["top"]};left:{position["left"]};transform:translate(-50%,-50%);"><summary>{process_name}</summary><div class="process-accordion-content">{"".join(variable_rows)}</div></details>')
-        return ui.HTML(f'{accordion_style}{legend_html}<div style="position:relative;width:100%;height:600px;{background_style};border:1px solid #e0e0e0;border-radius:8px">{"".join(process_boxes)}</div>')
+            process_boxes.append(
+                f'<details class="process-accordion" open style="top:{position["top"]};left:{position["left"]};transform:translate(-50%,-50%);">'
+                f'<summary>{process_name}</summary><div class="process-accordion-content">{"".join(variable_rows)}</div></details>'
+            )
+        return ui.HTML(
+            f'{accordion_style}{legend_html}'
+            f'<div style="position:relative;width:100%;height:600px;{background_style};border:1px solid #e0e0e0;border-radius:8px">'
+            f'{"".join(process_boxes)}</div>'
+        )

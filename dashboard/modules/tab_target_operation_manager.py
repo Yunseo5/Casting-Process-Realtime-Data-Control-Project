@@ -1,6 +1,6 @@
 # ===========================
 # modules/tab_target_operation_manager.py
-# (완성본: 피클 모델 로더 + 불량 경보 연결 + 배포 경로 최적화)
+# (OTF 전용 한글폰트 로더 적용 버전: 배포시 한글 깨짐 방지)
 # ===========================
 
 from shiny import ui, render, reactive
@@ -17,6 +17,14 @@ matplotlib.use('Agg')
 
 # ---------- [추가] 내장 모델 로더/예측기 (app.py 수정 불필요) ----------
 import os, json, pickle, threading
+
+# (선택) Matplotlib 캐시를 앱 내부에 두고 싶다면 주석 해제
+# MPL_CACHE_DIR = Path(__file__).resolve().parents[1] / "assets" / ".mplcache"
+# os.environ.setdefault("MPLCONFIGDIR", str(MPL_CACHE_DIR))
+# try:
+#     MPL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# except Exception as e:
+#     print(f"[FONT] MPLCONFIGDIR 만들기 실패: {e}")
 
 class _TabModel:
     """게으른 로딩 + 싱글톤(배포 친화). 환경변수로 경로/피처 오버라이드."""
@@ -40,15 +48,12 @@ class _TabModel:
         self._load_once()
 
     def _load_once(self):
-        # modules/…/탭파일 → 프로젝트 루트(dashboard/)
         here = Path(__file__).resolve().parent
         project_root = here.parents[1]
 
-        # 기본 모델 경로: dashboard/data/models/LightGBM_v3.pkl
         default_model = project_root / "data" / "models" / "LightGBM_v1.pkl"
         model_path = Path(os.getenv("MODEL_PATH", default_model))
 
-        # 학습에 쓴 피처(이름/순서 동일). FEATURE_COLS_JSON로 교체 가능.
         default_feats = [
             "molten_temp","facility_operation_cycleTime","production_cycletime",
             "low_section_speed","high_section_speed","molten_volume","cast_pressure",
@@ -87,7 +92,7 @@ class _TabModel:
                     .astype(float).fillna(0.0).values.reshape(1, -1)
             m = self._model
             if hasattr(m, "predict_proba"):
-                prob = float(m.predict_proba(x)[0, 1])     # 1-class 확률
+                prob = float(m.predict_proba(x)[0, 1])
                 return {"prob": prob}
             elif hasattr(m, "decision_function"):
                 score = float(m.decision_function(x)[0])
@@ -102,22 +107,45 @@ class _TabModel:
 _MODEL_SINGLETON = _TabModel()
 
 def _predict_row_from_model(row: pd.Series):
-    """app.py에서 predict_row 안 넘겨주면 이 기본 훅 사용."""
     return _MODEL_SINGLETON.predict_row(row)
 # ---------------------------------------------------------------------
 
+# ===========================
+# 한글 폰트: OTF만 로드(요청안)
+# ===========================
+def setup_korean_font_otf_only():
+    """
+    번들된 OTF만 사용. 성공 시 해당 family를 전역 기본 폰트로 지정.
+    실패하면 경고만 찍고(DejaVu 유지) 계속 진행.
+    """
+    try:
+        base_dir = Path(__file__).resolve().parents[1]  # dashboard/
+        otf_candidates = [
+            base_dir / "assets" / "fonts" / "NanumGothic.otf",
+            base_dir / "assets" / "fonts" / "NotoSansKR-Regular.otf",
+        ]
+        for fp in otf_candidates:
+            if fp.exists():
+                fm.fontManager.addfont(str(fp))
+                # 캐시 갱신
+                try:
+                    fm._load_fontmanager(try_read_cache=False)
+                except Exception:
+                    pass
+                family = fm.FontProperties(fname=str(fp)).get_name()
+                plt.rcParams["font.family"] = family
+                plt.rcParams["font.sans-serif"] = [family]
+                plt.rcParams["axes.unicode_minus"] = False
+                # 실제 사용 가능 확인
+                fm.findfont(family, fallback_to_default=False)
+                print(f"[FONT] Using bundled OTF: {fp} -> family='{family}'")
+                return
+        print("[FONT] No bundled OTF found or not usable. Korean may break.")
+    except Exception as e:
+        print(f"[FONT] OTF load failed: {e}")
 
-# 한글 폰트 설정
-def setup_korean_font():
-    fonts = [f.name for f in fm.fontManager.ttflist]
-    for font in ['Malgun Gothic', 'AppleGothic', 'NanumGothic', 'Noto Sans KR']:
-        if font in fonts:
-            plt.rcParams['font.family'] = font
-            return
-    plt.rcParams['font.family'] = 'DejaVu Sans'
-
-setup_korean_font()
-plt.rcParams['axes.unicode_minus'] = False
+# 초기 한 번 적용
+setup_korean_font_otf_only()
 
 # 상수
 MOLD_CODES = ["all", "8412", "8917", "8722", "8413", "8576"]
@@ -1190,6 +1218,9 @@ def tab_server(
 
     # 차트
     def create_single_chart(df, mold_code, variable, statuses=None, defect_info=None):
+        # 💡 렌더 직전 OTF 폰트 재적용(워커/캐시 이슈 방지)
+        setup_korean_font_otf_only()
+
         fig, ax = plt.subplots(figsize=(12, 4.5))
         ax.set_facecolor('#f8f9fa')
         fig.patch.set_facecolor('white')

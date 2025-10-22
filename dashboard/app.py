@@ -496,6 +496,7 @@ def create_sidebar():
     )
 
 app_ui = ui.page_fluid(
+    ui.page_opts(title="주조 공장 관리 대시보드", fillable=True),
     ui.HTML(app_assets),
     ui.div(ui.input_text("active_tab", None, value=DEFAULT_TAB), style="display:none;"),
     ui.div(
