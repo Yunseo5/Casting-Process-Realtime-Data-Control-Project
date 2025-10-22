@@ -604,9 +604,9 @@ def server(input, output, session):
     # ✅ 탭 서버 호출 (간소화)
     operation_server(input, output, session, streamer, shared_df, streaming_active)
     log_server(input, output, session, streamer, shared_df, streaming_active)
-    qc_server(input, output, session)
+    qc_server(input, output, session, streamer, shared_df, streaming_active)
     ai_server(input, output, session)
     
     session.on_ended(streamer.cleanup)
 
-app = App(app_ui, server, static_assets=str(Path(__file__).parent / "data" / "png"))
+app = App(app_ui, server)
