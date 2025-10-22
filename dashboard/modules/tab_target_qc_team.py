@@ -54,7 +54,7 @@ try:
 except (FileNotFoundError, KeyError):
     MOLD_CODE_CHOICES = []
 
-## UI에 표시할 변수 한글명 매핑
+### UI에 표시할 변수 한글명 매핑
 VARIABLE_LABELS = {
     "molten_temp": "용탕 온도",
     "low_section_speed": "하부 구간 속도",
