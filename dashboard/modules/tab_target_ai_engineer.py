@@ -831,8 +831,8 @@ def tab_server(input, output, session):
                     None,
                     choices={
                         "train": "학습 데이터",
-                        "highlight": "하이라이트 데이터",
-                        "non_highlight": "일반 데이터",
+                        "highlight": "F1-score 낮은 데이터",
+                        "non_highlight": "F1-score 높은 데이터",
                     },
                     selected=["train", "highlight"],
                     inline=True,
